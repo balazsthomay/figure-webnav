@@ -1,0 +1,1 @@
+"""Web navigation challenge agent."""
