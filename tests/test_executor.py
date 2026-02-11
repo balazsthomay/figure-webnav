@@ -6,19 +6,63 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from webnav.dispatcher import Action
+from webnav.actions import Action
+from webnav.perception import ElementInfo
 from webnav.executor import (
     run,
     submit_code,
     _extract_key_sequence,
     _parse_key_tokens,
+    _resolve_element,
 )
 from tests.conftest import make_mock_page
 
 
+def _make_elements() -> list[ElementInfo]:
+    """Create a small indexed element list for testing."""
+    return [
+        ElementInfo(index=0, tag="button", name="Reveal Code", selector="button:nth-of-type(1)"),
+        ElementInfo(index=1, tag="input", name="", type="text", placeholder="Enter code", selector="input:nth-of-type(1)"),
+        ElementInfo(index=2, tag="button", name="Submit Code", selector="button:nth-of-type(2)"),
+        ElementInfo(index=3, tag="canvas", name="", selector="canvas:nth-of-type(1)"),
+    ]
+
+
+class TestResolveElement:
+    def test_resolves_valid_index(self):
+        page = make_mock_page()
+        elements = _make_elements()
+        action = Action(type="click", element=0)
+        loc = _resolve_element(page, action, elements)
+        assert loc is not None
+        page.locator.assert_called_with("button:nth-of-type(1)")
+
+    def test_returns_none_for_out_of_range(self):
+        page = make_mock_page()
+        elements = _make_elements()
+        action = Action(type="click", element=99)
+        loc = _resolve_element(page, action, elements)
+        assert loc is None
+
+    def test_returns_none_for_none_index(self):
+        page = make_mock_page()
+        elements = _make_elements()
+        action = Action(type="click", element=None)
+        loc = _resolve_element(page, action, elements)
+        assert loc is None
+
+
 class TestRunAction:
     @pytest.mark.asyncio
-    async def test_click_action(self):
+    async def test_click_action_by_index(self):
+        page = make_mock_page()
+        elements = _make_elements()
+        action = Action(type="click", element=0)
+        result = await run(page, action, elements)
+        assert result is True
+
+    @pytest.mark.asyncio
+    async def test_click_action_by_selector(self):
         page = make_mock_page()
         action = Action(type="click", selector="button:has-text('Reveal')")
         result = await run(page, action)
@@ -36,7 +80,7 @@ class TestRunAction:
     @pytest.mark.asyncio
     async def test_wait_action(self):
         page = make_mock_page()
-        action = Action(type="wait", amount=0)  # 0 for speed in tests
+        action = Action(type="wait", amount=0)
         result = await run(page, action)
         assert result is True
 
@@ -57,7 +101,15 @@ class TestRunAction:
         page.evaluate.assert_called_with("document.title")
 
     @pytest.mark.asyncio
-    async def test_fill_action(self):
+    async def test_fill_action_by_index(self):
+        page = make_mock_page()
+        elements = _make_elements()
+        action = Action(type="fill", element=1, value="test123")
+        result = await run(page, action, elements)
+        assert result is True
+
+    @pytest.mark.asyncio
+    async def test_fill_action_by_selector(self):
         page = make_mock_page()
         action = Action(type="fill", selector="input", value="test123")
         result = await run(page, action)
@@ -80,8 +132,9 @@ class TestRunAction:
     @pytest.mark.asyncio
     async def test_click_with_multiple_attempts(self):
         page = make_mock_page()
-        action = Action(type="click", selector="button:has-text('Reveal')", amount=3)
-        result = await run(page, action)
+        elements = _make_elements()
+        action = Action(type="click", element=0, amount=3)
+        result = await run(page, action, elements)
         assert result is True
 
 
@@ -92,7 +145,6 @@ class TestScrollAction:
         action = Action(type="scroll", amount=250)
         result = await run(page, action)
         assert result is True
-        # Should have been called multiple times (100px steps)
         assert page.evaluate.call_count >= 2
 
 
@@ -126,7 +178,6 @@ class TestSubmitCode:
 
     @pytest.mark.asyncio
     async def test_submit_uses_enter_when_no_submit_button(self):
-        """Falls back to pressing Enter when no submit button is visible."""
         from playwright.async_api import TimeoutError as PlaywrightTimeout
 
         page = make_mock_page()
@@ -138,14 +189,12 @@ class TestSubmitCode:
         async def conditional_visible(timeout=500):
             nonlocal call_count
             call_count += 1
-            # First call succeeds (textbox), subsequent calls for submit buttons fail
             if call_count <= 1:
                 return True
             raise PlaywrightTimeout("timeout")
 
         mock_loc.is_visible = AsyncMock(side_effect=conditional_visible)
         result = await submit_code(page, "AB3F9X")
-        # Should still succeed — falls back to Enter key
         assert result is True
 
     @pytest.mark.asyncio
@@ -156,29 +205,9 @@ class TestSubmitCode:
         assert result is False
 
 
-class TestJsFallbackCode:
-    @pytest.mark.asyncio
-    async def test_js_stores_fallback_code(self):
-        page = make_mock_page()
-        page.evaluate = AsyncMock(return_value="fallback_code:XY9Z3K")
-        action = Action(type="js", value="some_js()")
-        result = await run(page, action)
-        assert result is True
-        assert action._found_code == "XY9Z3K"
-
-    @pytest.mark.asyncio
-    async def test_js_no_fallback_code(self):
-        page = make_mock_page()
-        page.evaluate = AsyncMock(return_value="some other result")
-        action = Action(type="js", value="some_js()")
-        await run(page, action)
-        assert not hasattr(action, "_found_code") or action._found_code is None
-
-
 class TestClickFallbacks:
     @pytest.mark.asyncio
     async def test_click_falls_back_to_get_by_role(self):
-        """When locator finds no visible element, try get_by_role."""
         page = make_mock_page()
         mock_loc = page.locator.return_value
         mock_loc.count = AsyncMock(return_value=1)
@@ -197,7 +226,6 @@ class TestClickFallbacks:
 
     @pytest.mark.asyncio
     async def test_click_falls_back_to_get_by_text(self):
-        """When get_by_role fails, try get_by_text."""
         page = make_mock_page()
         mock_loc = page.locator.return_value
         mock_loc.count = AsyncMock(return_value=1)
@@ -220,7 +248,6 @@ class TestClickFallbacks:
 
     @pytest.mark.asyncio
     async def test_click_no_has_text_returns_false(self):
-        """When selector has no has-text pattern and all locators fail."""
         page = make_mock_page()
         mock_loc = page.locator.return_value
         mock_loc.count = AsyncMock(return_value=0)
@@ -234,7 +261,6 @@ class TestClickFallbacks:
 class TestFillAction:
     @pytest.mark.asyncio
     async def test_fill_tries_fallback_selectors(self):
-        """When primary selector fails, tries input[type='text'] etc."""
         from playwright.async_api import TimeoutError as PlaywrightTimeout
 
         page = make_mock_page()
@@ -266,7 +292,6 @@ class TestFillAction:
 class TestHoverAction:
     @pytest.mark.asyncio
     async def test_hover_tries_text_selectors(self):
-        """When primary selector fails, tries text='Hover here'."""
         from playwright.async_api import TimeoutError as PlaywrightTimeout
 
         page = make_mock_page()
@@ -292,6 +317,8 @@ class TestHoverAction:
         from playwright.async_api import TimeoutError as PlaywrightTimeout
 
         page = make_mock_page()
+        # Make JS hover fail and all locator hovers fail
+        page.evaluate = AsyncMock(side_effect=Exception("js fail"))
         mock_loc = page.locator.return_value
         mock_loc.first = mock_loc
         mock_loc.is_visible = AsyncMock(side_effect=PlaywrightTimeout("timeout"))
@@ -301,79 +328,20 @@ class TestHoverAction:
         assert result is False
 
 
-class TestDragFillAction:
+class TestDragAction:
     @pytest.mark.asyncio
-    async def test_drag_fill_js_succeeds(self):
-        """JS strategy fills all slots."""
+    async def test_drag_js_succeeds(self):
         page = make_mock_page()
         page.evaluate = AsyncMock(return_value=6)
-        action = Action(type="drag_fill")
+        action = Action(type="drag")
         result = await run(page, action)
         assert result is True
 
     @pytest.mark.asyncio
-    async def test_drag_fill_js_fails_playwright_succeeds(self):
-        """JS returns <6, Playwright drag_to fills rest."""
-        page = make_mock_page()
-        eval_calls = 0
-
-        async def mock_eval(script):
-            nonlocal eval_calls
-            eval_calls += 1
-            if eval_calls <= 1:
-                return 3  # JS: only 3 filled
-            return 6  # After Playwright: all filled
-
-        page.evaluate = AsyncMock(side_effect=mock_eval)
-        mock_loc = page.locator.return_value
-        mock_loc.count = AsyncMock(return_value=3)
-        mock_loc.nth = MagicMock(return_value=mock_loc)
-        mock_loc.is_visible = AsyncMock(return_value=True)
-        mock_loc.drag_to = AsyncMock()
-
-        action = Action(type="drag_fill")
-        result = await run(page, action)
-        assert result is True
-
-    @pytest.mark.asyncio
-    async def test_drag_fill_mouse_simulation(self):
-        """Falls back to mouse simulation when other methods fail."""
-        page = make_mock_page()
-        eval_calls = 0
-
-        async def mock_eval(script):
-            nonlocal eval_calls
-            eval_calls += 1
-            if eval_calls <= 1:
-                return 0  # JS: none filled
-            if eval_calls <= 3:
-                return 0  # After Playwright attempts
-            # Mouse layout query
-            if "pieces" in str(script) and "slots" in str(script):
-                return {
-                    "pieces": [{"x": 100, "y": 100}],
-                    "slots": [{"x": 300, "y": 300}],
-                }
-            return 6  # Final check
-
-        page.evaluate = AsyncMock(side_effect=mock_eval)
-        mock_loc = page.locator.return_value
-        mock_loc.count = AsyncMock(return_value=0)
-        page.mouse = MagicMock()
-        page.mouse.move = AsyncMock()
-        page.mouse.down = AsyncMock()
-        page.mouse.up = AsyncMock()
-
-        action = Action(type="drag_fill")
-        result = await run(page, action)
-        # We just check it doesn't crash; actual result depends on mock eval sequence
-        assert isinstance(result, bool)
-
-    @pytest.mark.asyncio
-    async def test_drag_fill_exception(self):
+    async def test_drag_exception(self):
         page = make_mock_page()
         page.evaluate = AsyncMock(side_effect=Exception("broken"))
-        action = Action(type="drag_fill")
+        action = Action(type="drag")
         result = await run(page, action)
         assert result is False
 
@@ -401,15 +369,6 @@ class TestScrollElementAction:
         result = await run(page, action)
         assert result is False
 
-    @pytest.mark.asyncio
-    async def test_scroll_element_exception(self):
-        page = make_mock_page()
-        page.evaluate = AsyncMock(side_effect=Exception("broken"))
-
-        action = Action(type="scroll_element")
-        result = await run(page, action)
-        assert result is False
-
 
 class TestCanvasDrawAction:
     @pytest.mark.asyncio
@@ -426,10 +385,10 @@ class TestCanvasDrawAction:
         page.mouse.down = AsyncMock()
         page.mouse.up = AsyncMock()
 
-        action = Action(type="canvas_draw")
+        action = Action(type="draw_strokes")
         result = await run(page, action)
         assert result is True
-        assert page.mouse.down.call_count == 5  # 5 strokes
+        assert page.mouse.down.call_count == 5
 
     @pytest.mark.asyncio
     async def test_canvas_draw_not_visible(self):
@@ -438,7 +397,7 @@ class TestCanvasDrawAction:
         mock_loc.first = mock_loc
         mock_loc.is_visible = AsyncMock(return_value=False)
 
-        action = Action(type="canvas_draw")
+        action = Action(type="draw_strokes")
         result = await run(page, action)
         assert result is False
 
@@ -450,23 +409,20 @@ class TestCanvasDrawAction:
         mock_loc.is_visible = AsyncMock(return_value=True)
         mock_loc.bounding_box = AsyncMock(return_value=None)
 
-        action = Action(type="canvas_draw")
-        result = await run(page, action)
-        assert result is False
-
-    @pytest.mark.asyncio
-    async def test_canvas_draw_exception(self):
-        page = make_mock_page()
-        mock_loc = page.locator.return_value
-        mock_loc.first = mock_loc
-        mock_loc.is_visible = AsyncMock(side_effect=Exception("broken"))
-
-        action = Action(type="canvas_draw")
+        action = Action(type="draw_strokes")
         result = await run(page, action)
         assert result is False
 
 
 class TestKeySequenceAction:
+    @pytest.mark.asyncio
+    async def test_key_sequence_from_action_value(self):
+        page = make_mock_page()
+        action = Action(type="key_sequence", value="ArrowUp ArrowDown")
+        result = await run(page, action)
+        assert result is True
+        assert page.keyboard.press.call_count == 2
+
     @pytest.mark.asyncio
     async def test_key_sequence_reads_from_page(self):
         page = make_mock_page(
@@ -491,14 +447,6 @@ class TestKeySequenceAction:
         result = await run(page, action)
         assert result is True
         assert page.keyboard.press.call_count == 3
-
-    @pytest.mark.asyncio
-    async def test_key_sequence_exception(self):
-        page = make_mock_page()
-        page.inner_text = AsyncMock(side_effect=Exception("broken"))
-        action = Action(type="key_sequence")
-        result = await run(page, action)
-        assert result is False
 
 
 class TestExtractKeySequence:
@@ -566,7 +514,6 @@ class TestSelectActionFail:
 class TestActionException:
     @pytest.mark.asyncio
     async def test_top_level_exception_returns_false(self):
-        """Any exception in the action handler is caught and returns False."""
         page = make_mock_page()
         page.evaluate = AsyncMock(side_effect=Exception("broken"))
         action = Action(type="scroll", amount=100)

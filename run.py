@@ -13,12 +13,17 @@ sys.path.insert(0, str(Path(__file__).parent / "src"))
 from dotenv import load_dotenv
 
 
-async def main(headless: bool = True) -> int:
+async def main(headless: bool = True, url: str | None = None) -> int:
     load_dotenv()
 
     from webnav.agent import Agent
+    from webnav.config import ChallengeConfig
 
-    agent = Agent(headless=headless)
+    config = ChallengeConfig()
+    if url:
+        config.url = url
+
+    agent = Agent(headless=headless, config=config)
     metrics = await agent.run()
 
     # Exit code: 0 if >=28/30 solved, 1 otherwise
@@ -28,7 +33,8 @@ async def main(headless: bool = True) -> int:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Web Navigation Challenge Agent")
     parser.add_argument("--no-headless", action="store_true", help="Run with visible browser")
+    parser.add_argument("--url", type=str, default=None, help="Challenge site URL")
     args = parser.parse_args()
 
-    exit_code = asyncio.run(main(headless=not args.no_headless))
+    exit_code = asyncio.run(main(headless=not args.no_headless, url=args.url))
     sys.exit(exit_code)

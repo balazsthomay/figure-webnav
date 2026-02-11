@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from webnav.agent import Agent, _try_reveal_click, _REVEAL_LABELS
-from webnav.dispatcher import Action
+from webnav.actions import Action
 from tests.conftest import (
     STEP1_ARIA_YAML,
     STEP3_ARIA_YAML_WITH_CODE,
@@ -110,42 +110,6 @@ class TestAgentSolveStep:
 
     @pytest.mark.asyncio
     @patch.dict("os.environ", {"OPENROUTER_API_KEY": "test-key"})
-    async def test_solve_step_session_storage_fallback(self):
-        """When no code found normally, falls back to session storage."""
-        agent = Agent(headless=True)
-        page = make_mock_page(
-            url="https://serene-frangipane-7fd25b.netlify.app/step10?version=2",
-            inner_text="Puzzle Challenge: Solve this puzzle",
-            aria_yaml='- heading "Challenge Step 10"\n- paragraph "Puzzle Challenge: Solve this puzzle"',
-        )
-
-        eval_calls = 0
-
-        async def mock_eval(script):
-            nonlocal eval_calls
-            eval_calls += 1
-            # Session storage JS returns a code
-            if "sessionStorage" in str(script) and "wo_session" in str(script):
-                return "XK7F3Q"
-            return None
-
-        page.evaluate = AsyncMock(side_effect=mock_eval)
-        page.wait_for_url = AsyncMock()
-
-        # Simulate URL advancing after code submission
-        async def advancing_url(*args, **kwargs):
-            page.url = "https://serene-frangipane-7fd25b.netlify.app/step11?version=2"
-
-        mock_loc = page.locator.return_value
-        mock_loc.click = AsyncMock(side_effect=advancing_url)
-
-        agent.browser._page = page
-        result = await agent._solve_step(10)
-        # Should have found the code via session storage
-        assert isinstance(result, bool)
-
-    @pytest.mark.asyncio
-    @patch.dict("os.environ", {"OPENROUTER_API_KEY": "test-key"})
     async def test_solve_step_tier2_on_multiple_failures(self):
         """On attempt >= 2, calls Tier 2 LLM with screenshot."""
         agent = Agent(headless=True)
@@ -155,7 +119,7 @@ class TestAgentSolveStep:
             aria_yaml='- heading "Challenge Step 5"\n- paragraph "Something weird"',
         )
         agent.solver.solve_stuck = AsyncMock(
-            return_value=[Action(type="click", selector="button:has-text('Reveal')")]
+            return_value=[Action(type="click", element=0)]
         )
         page.wait_for_url = AsyncMock()
         agent.browser._page = page
@@ -260,3 +224,11 @@ class TestAgentInit:
         assert agent.state is not None
         assert agent.metrics is not None
         assert agent._used_codes == set()
+
+    @patch.dict("os.environ", {"OPENROUTER_API_KEY": "test-key"})
+    def test_accepts_config(self):
+        from webnav.config import ChallengeConfig
+        config = ChallengeConfig(url="https://example.com", total_steps=10)
+        agent = Agent(headless=True, config=config)
+        assert agent.config.url == "https://example.com"
+        assert agent.config.total_steps == 10

@@ -1,4 +1,4 @@
-"""A11y tree extraction and compression into a compact page state."""
+"""A11y tree extraction, element indexing, and compression into a compact page state."""
 
 from __future__ import annotations
 
@@ -26,6 +26,21 @@ _FALSE_POSITIVE = re.compile(r"^(SUBMIT|SCROLL|CLICK[S]?|REVEAL|BUTTON|HIDDEN|ST
 
 
 @dataclass
+class ElementInfo:
+    """An interactive element on the page, indexed for LLM reference."""
+
+    index: int
+    tag: str
+    role: str = ""
+    name: str = ""
+    type: str = ""  # input type attribute
+    placeholder: str = ""
+    selector: str = ""  # unique CSS selector for Playwright
+    visible: bool = True
+    bbox: dict[str, float] | None = None
+
+
+@dataclass
 class PageState:
     """Compressed representation of a challenge page."""
 
@@ -36,25 +51,147 @@ class PageState:
     visible_codes: list[str] = field(default_factory=list)
     raw_text: str = ""
     aria_yaml: str = ""
+    elements: list[ElementInfo] = field(default_factory=list)
 
     def to_prompt(self) -> str:
-        """Render as compact text for LLM consumption."""
+        """Render as compact text for LLM consumption with indexed elements."""
         parts = [
             f"STEP: {self.step}/30",
             f'INSTRUCTION: "{self.instruction}"',
         ]
         if self.progress:
             parts.append(f'PROGRESS: "{self.progress}"')
-        if self.interactive:
-            items = [f'{e["role"]} "{e["name"]}"' for e in self.interactive[:8]]
-            parts.append(f"INTERACTIVE: [{', '.join(items)}]")
         if self.visible_codes:
             parts.append(f"VISIBLE_CODES: {self.visible_codes}")
+
+        # Render indexed elements
+        if self.elements:
+            elem_lines = []
+            for el in self.elements:
+                desc = f"[{el.index}] {el.tag}"
+                if el.role:
+                    desc += f" role={el.role}"
+                if el.name:
+                    desc += f' "{el.name}"'
+                if el.type:
+                    desc += f" type={el.type}"
+                if el.placeholder:
+                    desc += f' placeholder="{el.placeholder}"'
+                elem_lines.append(desc)
+            parts.append("ELEMENTS:\n" + "\n".join(elem_lines))
+
+        # Include page text context (filtered)
+        if self.raw_text:
+            lines = []
+            for line in self.raw_text.splitlines():
+                line = line.strip()
+                if not line or len(line) < 3:
+                    continue
+                if _NOISE_PATTERNS.search(line):
+                    continue
+                lines.append(line)
+            text_block = "\n".join(lines[:30])
+            if text_block:
+                parts.append(f"PAGE_TEXT:\n{text_block}")
+
         if self.aria_yaml:
-            # Include truncated YAML for LLM context
             truncated = "\n".join(self.aria_yaml.splitlines()[:50])
             parts.append(f"ARIA_TREE:\n{truncated}")
         return "\n".join(parts)
+
+
+# ---------- Element indexing ----------
+
+# JS that enumerates all interactive elements and returns their metadata.
+# Returns a JSON-serializable array of element info dicts.
+_INDEX_ELEMENTS_JS = """
+(() => {
+    const selector = 'a, button, input, select, textarea, canvas, ' +
+        '[role="button"], [draggable="true"], [onclick], [tabindex]';
+    const els = document.querySelectorAll(selector);
+    const results = [];
+    let idx = 0;
+    for (const el of els) {
+        const rect = el.getBoundingClientRect();
+        // Skip invisible elements (zero size or off-screen)
+        if (rect.width < 2 || rect.height < 2) continue;
+        if (rect.bottom < 0 || rect.top > window.innerHeight * 3) continue;
+
+        // Build a unique selector
+        let uniqueSelector = '';
+        if (el.id) {
+            uniqueSelector = '#' + CSS.escape(el.id);
+        } else {
+            const tag = el.tagName.toLowerCase();
+            const parent = el.parentElement;
+            if (parent) {
+                const siblings = parent.querySelectorAll(':scope > ' + tag);
+                const nthIdx = Array.from(siblings).indexOf(el) + 1;
+                // Build a path: parent > tag:nth-of-type(n)
+                let parentSel = '';
+                if (parent.id) {
+                    parentSel = '#' + CSS.escape(parent.id);
+                } else {
+                    const pTag = parent.tagName.toLowerCase();
+                    const grandparent = parent.parentElement;
+                    if (grandparent) {
+                        const pSiblings = grandparent.querySelectorAll(':scope > ' + pTag);
+                        const pIdx = Array.from(pSiblings).indexOf(parent) + 1;
+                        parentSel = pTag + ':nth-of-type(' + pIdx + ')';
+                    } else {
+                        parentSel = pTag;
+                    }
+                }
+                uniqueSelector = parentSel + ' > ' + tag + ':nth-of-type(' + nthIdx + ')';
+            } else {
+                uniqueSelector = tag;
+            }
+        }
+
+        results.push({
+            index: idx,
+            tag: el.tagName.toLowerCase(),
+            role: el.getAttribute('role') || '',
+            name: (el.textContent || '').trim().substring(0, 80),
+            type: el.getAttribute('type') || '',
+            placeholder: el.getAttribute('placeholder') || '',
+            selector: uniqueSelector,
+            visible: el.offsetParent !== null || el.tagName === 'INPUT',
+            bbox: {x: rect.x, y: rect.y, width: rect.width, height: rect.height}
+        });
+        idx++;
+    }
+    return results;
+})()
+"""
+
+
+async def index_elements(page: Page) -> list[ElementInfo]:
+    """Enumerate all interactive elements on the page and return indexed list."""
+    try:
+        raw = await page.evaluate(_INDEX_ELEMENTS_JS)
+    except Exception:
+        return []
+
+    if not isinstance(raw, list):
+        return []
+
+    elements: list[ElementInfo] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        elements.append(ElementInfo(
+            index=item.get("index", 0),
+            tag=item.get("tag", ""),
+            role=item.get("role", ""),
+            name=item.get("name", ""),
+            type=item.get("type", ""),
+            placeholder=item.get("placeholder", ""),
+            selector=item.get("selector", ""),
+            visible=item.get("visible", True),
+            bbox=item.get("bbox"),
+        ))
+    return elements
 
 
 # ---------- Node-based helpers (used by both old dict tree and new YAML) ----------
@@ -225,9 +362,10 @@ def _extract_instruction_from_text(text: str) -> str:
 
 
 async def snapshot(page: Page) -> PageState:
-    """Take a compressed accessibility snapshot of the current page.
+    """Take a compressed accessibility snapshot with indexed elements.
 
-    Uses the modern Playwright aria_snapshot() API (v1.49+).
+    Uses the modern Playwright aria_snapshot() API (v1.49+)
+    and enumerates interactive elements for index-based actions.
     """
     url = page.url
 
@@ -261,6 +399,9 @@ async def snapshot(page: Page) -> PageState:
         if code not in codes and not _FALSE_POSITIVE.match(code):
             codes.append(code)
 
+    # Index interactive elements
+    elements = await index_elements(page)
+
     return PageState(
         step=step,
         instruction=instruction,
@@ -269,4 +410,5 @@ async def snapshot(page: Page) -> PageState:
         visible_codes=codes,
         raw_text=raw_text,
         aria_yaml=aria_yaml,
+        elements=elements,
     )

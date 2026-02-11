@@ -83,7 +83,8 @@ class MetricsCollector:
 
     def print_step_summary(self, step_metric: StepMetric) -> None:
         status = "OK" if step_metric.success else "FAIL"
-        tier_label = ["T0:regex", "T1:flash", "T2:haiku"][step_metric.tier_used]
+        tier_labels = {0: "T0:none", 1: "T1:flash", 2: "T2:haiku"}
+        tier_label = tier_labels.get(step_metric.tier_used, f"T{step_metric.tier_used}")
         code_info = f" code={step_metric.code_found}" if step_metric.code_found else ""
         err_info = f" err={step_metric.error}" if step_metric.error else ""
         print(

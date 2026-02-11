@@ -1,4 +1,4 @@
-"""Tier 1+2: LLM-based challenge solving via OpenRouter."""
+"""LLM-based challenge solving via OpenRouter — general-purpose CUA."""
 
 from __future__ import annotations
 
@@ -11,45 +11,71 @@ from typing import Any
 
 from openai import AsyncOpenAI
 
-from webnav.dispatcher import Action
+from webnav.actions import Action
 from webnav.perception import PageState
 
 
 # OpenRouter models
-FAST_MODEL = "google/gemini-3-flash-preview"  # Tier 1: fast + cheap
-SMART_MODEL = "anthropic/claude-haiku-4-5"  # Tier 2: vision + reasoning
+FAST_MODEL = "google/gemini-3-flash-preview"  # Primary: fast + cheap
+SMART_MODEL = "anthropic/claude-haiku-4-5"  # Recovery: vision + reasoning
 
-SYSTEM_PROMPT = """You are a browser automation agent solving challenges on a website.
-Each challenge requires you to perform an action (click, scroll, wait, etc.) to reveal a 6-character alphanumeric code.
+SYSTEM_PROMPT = """You are a browser automation agent. You see a numbered list of page elements and a description of the current page. Decide what actions to take to complete the challenge and reveal a 6-character code.
 
-Given the page state, return a JSON array of actions to perform.
-Each action is an object with:
-- "type": one of "click", "fill", "scroll", "wait", "press", "js", "hover"
-- "selector": CSS selector or text selector (for click/fill/hover)
-- "value": value to type/press/evaluate (for fill/press/js)
-- "amount": numeric amount (for scroll px or wait seconds)
+Available actions (use element indices from the ELEMENTS list):
+- click(element) — click an element by index
+- click(element, amount) — click an element N times
+- fill(element, text) — type text into an input by index
+- scroll(amount) — scroll down by pixels (no element needed)
+- hover(element, duration) — hover over element for N seconds
+- press(key) — press keyboard key (e.g. "Enter", "ArrowUp")
+- wait(seconds) — wait N seconds
+- drag(from_element, to_element) — drag and drop between elements
+- draw_strokes(element) — draw strokes on a canvas element
+- key_sequence(keys) — press multiple keys (e.g. "ArrowUp ArrowDown ArrowLeft")
+- js(code) — run JavaScript (use sparingly, only when no element action works)
 
-Examples:
-- [{"type": "click", "selector": "button:has-text('Reveal Code')"}]
-- [{"type": "scroll", "amount": 600}]
-- [{"type": "wait", "amount": 5}]
-- [{"type": "js", "value": "document.querySelector('.hidden').style.display='block'"}]
+Respond with a JSON array of actions. Each action is an object:
+- {"action": "click", "element": 3}
+- {"action": "click", "element": 3, "amount": 5}
+- {"action": "fill", "element": 7, "text": "hello world"}
+- {"action": "scroll", "amount": 600}
+- {"action": "hover", "element": 5, "duration": 3}
+- {"action": "press", "key": "Enter"}
+- {"action": "wait", "seconds": 5}
+- {"action": "drag", "from_element": 2, "to_element": 8}
+- {"action": "draw_strokes", "element": 4}
+- {"action": "key_sequence", "keys": "ArrowUp ArrowDown"}
+- {"action": "js", "code": "document.querySelector('.hidden').style.display='block'"}
+
+Think step by step about what the page is asking you to do. Common patterns:
+- "Click the button" → find the button in ELEMENTS, click it
+- "Scroll down N px" → scroll(N+100)
+- "Wait N seconds" → wait(N+2)
+- "Hover over element for N seconds" → hover the element with duration N+1
+- "Hidden in DOM" → use js() to reveal hidden elements, then look for codes
+- "Drag pieces into slots" → drag each draggable to its target
+- "Draw on canvas" → draw_strokes on the canvas element
+- "Press keys in sequence" → read the required keys from PAGE_TEXT, use key_sequence
+- "Solve the puzzle" → read the math expression from PAGE_TEXT, compute answer, fill the answer input
+- If a code is already visible in VISIBLE_CODES, no action needed (agent will submit it)
 
 Return ONLY the JSON array, no explanation."""
 
-STUCK_PROMPT = """You are analyzing a browser challenge where the agent is stuck.
-Look at the page state and screenshot carefully.
+STUCK_PROMPT = """You are analyzing a browser challenge where previous attempts failed. Look at the page state and screenshot carefully.
 
-What action should be taken to reveal the 6-character code?
-Consider:
-- Hidden elements that need to be revealed
-- Buttons that look like decoys but are real
-- Timer-based reveals
-- Scroll-triggered reveals
-- Interaction sequences
+The agent tried standard approaches but couldn't reveal the 6-character code. Consider:
+- Hidden elements that need JS to reveal (display:none, visibility:hidden, opacity:0)
+- Elements in shadow DOM, iframes, or unusual locations
+- Timer-based reveals that need waiting
+- Multi-step interactions (click then hover then type)
+- Canvas/drawing challenges
+- Drag-and-drop challenges
+- Elements hidden in HTML comments or data attributes
+- React component state containing the code
 
-Return a JSON array of actions. Be creative — the obvious approach already failed.
-Return ONLY the JSON array, no explanation."""
+Use the available actions from the element list. Be creative — try approaches the agent hasn't attempted.
+
+Return ONLY a JSON array of actions, no explanation."""
 
 
 @dataclass
@@ -68,14 +94,14 @@ class Solver:
         )
 
     async def solve(self, state: PageState) -> list[Action]:
-        """Tier 1: Fast LLM solve using compressed page state."""
+        """Primary LLM solve using compressed page state with indexed elements."""
         prompt = state.to_prompt()
         return await self._call_llm(FAST_MODEL, SYSTEM_PROMPT, prompt)
 
     async def solve_stuck(
         self, state: PageState, screenshot: bytes | None = None
     ) -> list[Action]:
-        """Tier 2: Smart LLM with optional screenshot for stuck recovery."""
+        """Recovery LLM with optional screenshot for stuck puzzles."""
         messages: list[dict[str, Any]] = [
             {"role": "system", "content": STUCK_PROMPT},
         ]
@@ -108,7 +134,7 @@ class Solver:
             response = await self._client.chat.completions.create(
                 model=model,
                 messages=messages,
-                max_tokens=256,
+                max_tokens=512,
                 temperature=0.0,
             )
             self.total_calls += 1
@@ -118,13 +144,16 @@ class Solver:
             raw = response.choices[0].message.content or "[]"
             return _parse_actions(raw)
         except Exception as e:
-            # Fallback: return empty actions on LLM failure
             print(f"[solver] LLM call failed ({model}): {e}")
             return []
 
 
 def _parse_actions(raw: str) -> list[Action]:
-    """Parse LLM JSON response into Action objects."""
+    """Parse LLM JSON response into Action objects.
+
+    Handles the new index-based format:
+        [{"action": "click", "element": 3}, {"action": "scroll", "amount": 600}]
+    """
     # Strip markdown code fences if present
     raw = raw.strip()
     raw = re.sub(r"^```(?:json)?\s*", "", raw)
@@ -138,17 +167,37 @@ def _parse_actions(raw: str) -> list[Action]:
     if not isinstance(data, list):
         data = [data]
 
+    valid_actions = {
+        "click", "fill", "scroll", "wait", "press", "js", "hover",
+        "select", "drag", "key_sequence", "draw_strokes",
+        # Legacy names for backward compat with LLM output
+        "drag_fill", "canvas_draw",
+    }
+
     actions: list[Action] = []
     for item in data:
         if not isinstance(item, dict):
             continue
-        action_type = item.get("type", "")
-        if action_type not in {"click", "fill", "scroll", "wait", "press", "js", "hover", "select", "drag_fill", "key_sequence", "canvas_draw"}:
+
+        # Support both "action" and "type" keys
+        action_type = item.get("action") or item.get("type", "")
+
+        # Normalize legacy names
+        if action_type == "canvas_draw":
+            action_type = "draw_strokes"
+        if action_type == "drag_fill":
+            action_type = "drag"
+
+        if action_type not in valid_actions:
             continue
+
         actions.append(Action(
             type=action_type,
+            element=item.get("element"),
             selector=item.get("selector", ""),
-            value=item.get("value", ""),
-            amount=int(item.get("amount", 0)),
+            value=item.get("text") or item.get("value") or item.get("code") or item.get("key") or item.get("keys") or "",
+            amount=int(item.get("amount") or item.get("seconds") or 0),
+            to_element=item.get("to_element"),
+            duration=float(item.get("duration") or 0),
         ))
     return actions
