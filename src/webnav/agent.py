@@ -133,8 +133,15 @@ class Agent:
 
             # 5. Execute actions
             for action in actions:
-                desc = f"element={action.element}" if action.element is not None else (action.value[:60] if action.value else str(action.amount))
-                print(f"[agent]   -> {action.type} {desc}")
+                el_desc = ""
+                if action.element is not None and action.element < len(page_state.elements):
+                    ei = page_state.elements[action.element]
+                    el_desc = f"element={action.element} ({ei.tag} \"{ei.name[:40]}\")"
+                elif action.element is not None:
+                    el_desc = f"element={action.element}"
+                else:
+                    el_desc = action.value[:60] if action.value else str(action.amount)
+                print(f"[agent]   -> {action.type} {el_desc}")
                 await execute_action(self.browser.page, action, page_state.elements)
 
             # Brief pause for page reaction
@@ -156,6 +163,22 @@ class Agent:
                 await self.browser.page.evaluate(_REVEAL_HIDDEN_JS)
                 await asyncio.sleep(0.2)
                 code = await find_code(self.browser.page, self._used_codes)
+
+            # Programmatic "click here N times" fallback
+            if code is None:
+                code = await _try_click_here(self.browser.page, page_state.instruction, self._used_codes)
+
+            # Programmatic "find scattered parts" fallback
+            if code is None and "part" in page_state.instruction.lower():
+                code = await _try_find_parts(self.browser.page, self._used_codes)
+
+            # Programmatic "sequence challenge" fallback
+            if code is None and "sequence" in page_state.instruction.lower() and "complete" in page_state.instruction.lower():
+                code = await _try_sequence_actions(self.browser.page, self._used_codes)
+
+            # Programmatic "hover challenge" fallback
+            if code is None and "hover" in page_state.instruction.lower():
+                code = await _try_hover(self.browser.page, self._used_codes)
 
             # Brief poll
             if code is None and not self.state.is_step_timed_out():
@@ -228,6 +251,71 @@ class Agent:
         await asyncio.sleep(1.0)
 
 
+async def _try_hover(
+    page: "Page", used_codes: set[str]
+) -> str | None:
+    """Programmatic fallback: find and hover over the challenge hover target."""
+    print("[agent] Hover fallback: finding and hovering target via Playwright mouse")
+
+    candidates = await page.evaluate("""
+        () => {
+            const candidates = [];
+            for (const el of document.querySelectorAll('div, section, span, p')) {
+                if (el.offsetParent === null) continue;
+                const style = window.getComputedStyle(el);
+                const rect = el.getBoundingClientRect();
+                if (rect.width < 20 || rect.height < 20) continue;
+                if (rect.width > 800) continue;
+                const tag = el.tagName;
+                if (tag === 'BUTTON' || tag === 'A' || tag === 'INPUT') continue;
+                const text = (el.textContent || '').toLowerCase();
+                const hasCursorPointer = style.cursor === 'pointer' ||
+                    (el.className || '').includes('cursor-pointer');
+                const hasBgColor = style.backgroundColor !== 'rgba(0, 0, 0, 0)' &&
+                    style.backgroundColor !== 'transparent';
+                const hasHoverText = text.includes('hover');
+                let score = 0;
+                if (hasHoverText && hasCursorPointer) score += 20;
+                if (hasHoverText) score += 10;
+                if (hasCursorPointer) score += 5;
+                if (hasBgColor && rect.width > 50 && rect.height > 50) score += 3;
+                if (text.length > 200) score -= 10;
+                if (el.children.length > 5) score -= 5;
+                if (score > 0) {
+                    candidates.push({
+                        x: rect.x + rect.width/2, y: rect.y + rect.height/2,
+                        score, text: text.slice(0, 40), tag
+                    });
+                }
+            }
+            candidates.sort((a, b) => b.score - a.score);
+            return candidates.slice(0, 3);
+        }
+    """)
+
+    if not candidates:
+        print("[agent] Hover fallback: no targets found")
+        return None
+
+    for t in candidates:
+        print(f"[agent] Hover fallback: trying {t['tag']} '{t['text']}' (score={t['score']})")
+        try:
+            await page.mouse.move(t["x"], t["y"])
+            for i in range(10):
+                await asyncio.sleep(0.15)
+                await page.mouse.move(t["x"] + (i % 3) - 1, t["y"])
+        except Exception as e:
+            print(f"[agent] Hover fallback: failed: {e}")
+            continue
+
+        await page.wait_for_timeout(200)
+        code = await find_code(page, used_codes)
+        if code:
+            return code
+
+    return None
+
+
 # Generic JS to reveal hidden codes — targeted approach.
 _REVEAL_HIDDEN_JS = """
 (() => {
@@ -273,3 +361,255 @@ async def _try_reveal_click(page: "Page") -> None:
     if clicked:
         print(f"[agent] Reveal click: {clicked}")
         await page.wait_for_timeout(300)
+
+
+async def _try_click_here(
+    page: "Page", instruction: str, used_codes: set[str]
+) -> str | None:
+    """Programmatic fallback: if instruction says 'click here N times', do it."""
+    import re as _re
+
+    match = _re.search(r"click\s+here\s+(\d+)\s+more\s+time", instruction, _re.IGNORECASE)
+    if not match:
+        return None
+
+    n = int(match.group(1)) + 1  # +1 safety margin
+    print(f"[agent] Click-here fallback: clicking {n} times via Playwright")
+
+    # Use Playwright real clicks for proper React event handling
+    try:
+        # Find the "click here" button/element
+        loc = page.get_by_text("click here", exact=False).first
+        for i in range(n):
+            await loc.click(timeout=1000, force=True)
+            await page.wait_for_timeout(150)
+        print(f"[agent] Click-here: clicked {n} times via Playwright locator")
+    except Exception as e:
+        print(f"[agent] Click-here Playwright failed ({e}), trying JS fallback")
+        await page.evaluate("""
+            (n) => {
+                const candidates = [];
+                for (const el of document.querySelectorAll('*')) {
+                    const text = (el.textContent || '').toLowerCase();
+                    if (text.includes('click here') && el.offsetParent !== null) {
+                        candidates.push({el, len: (el.textContent || '').length});
+                    }
+                }
+                candidates.sort((a, b) => a.len - b.len);
+                if (candidates.length === 0) return;
+                const target = candidates[0].el;
+                for (let i = 0; i < n; i++) {
+                    target.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true}));
+                }
+            }
+        """, n)
+
+    await page.wait_for_timeout(500)
+
+    # Now scan for the code
+    code = await find_code(page, used_codes)
+    if code:
+        return code
+
+    # Try reveal hidden after clicking
+    await page.evaluate(_REVEAL_HIDDEN_JS)
+    await page.wait_for_timeout(200)
+    return await find_code(page, used_codes)
+
+
+async def _try_find_parts(
+    page: "Page", used_codes: set[str]
+) -> str | None:
+    """Programmatic fallback: find and click scattered 'part' elements using Playwright clicks."""
+    print("[agent] Find-parts fallback: searching for scattered clickable parts")
+
+    # Find ALL small absolute-positioned elements and cursor:pointer elements
+    # that might be "parts" — get their coordinates for Playwright clicks
+    targets = await page.evaluate("""
+        () => {
+            const targets = [];
+            const seen = new Set();
+            for (const el of document.querySelectorAll('*')) {
+                if (el.offsetParent === null && el.tagName !== 'BODY') continue;
+                const rect = el.getBoundingClientRect();
+                if (rect.width < 5 || rect.height < 5) continue;
+                if (rect.top < 0 || rect.top > window.innerHeight * 3) continue;
+
+                const text = (el.textContent || '').trim();
+                const tag = el.tagName.toLowerCase();
+                const style = window.getComputedStyle(el);
+                const isAbsolute = style.position === 'absolute' || style.position === 'fixed';
+                const hasCursorPointer = style.cursor === 'pointer';
+                const isLeaf = el.childElementCount === 0;
+
+                // Skip navigation/noise buttons
+                if (/submit|next|prev|continue|proceed|advance|go forward|keep going|move on/i.test(text)) continue;
+                // Skip large elements (containers)
+                if (rect.width > 300 && rect.height > 100) continue;
+
+                let score = 0;
+                // Part-like text
+                if (/part\\s*\\d|fragment|piece|star|\\u2605|\\u2606|\\u25cf|\\u25cb/i.test(text)) score += 20;
+                // Small absolute-positioned clickable elements
+                if (isAbsolute && hasCursorPointer && isLeaf) score += 15;
+                if (isAbsolute && isLeaf && text.length < 20) score += 10;
+                if (hasCursorPointer && isLeaf && text.length < 20) score += 8;
+                // Small colored elements (visual markers)
+                if (isLeaf && rect.width < 50 && rect.height < 50 && style.backgroundColor !== 'transparent'
+                    && style.backgroundColor !== 'rgba(0, 0, 0, 0)') score += 5;
+
+                if (score > 0) {
+                    const key = Math.round(rect.x) + ',' + Math.round(rect.y);
+                    if (!seen.has(key)) {
+                        seen.add(key);
+                        targets.push({
+                            x: rect.x + rect.width/2, y: rect.y + rect.height/2,
+                            score, text: text.slice(0, 30), tag, w: Math.round(rect.width), h: Math.round(rect.height)
+                        });
+                    }
+                }
+            }
+            targets.sort((a, b) => b.score - a.score);
+            return targets.slice(0, 10);
+        }
+    """)
+
+    if not targets:
+        print("[agent] Find-parts: no targets found")
+        return None
+
+    print(f"[agent] Find-parts: found {len(targets)} candidates")
+    for t in targets:
+        print(f"[agent] Find-parts: clicking {t['tag']} '{t['text']}' ({t['w']}x{t['h']}) score={t['score']}")
+        try:
+            await page.mouse.click(t["x"], t["y"])
+            await page.wait_for_timeout(200)
+        except Exception as e:
+            print(f"[agent] Find-parts: click failed: {e}")
+
+    await page.wait_for_timeout(500)
+
+    code = await find_code(page, used_codes)
+    if code:
+        return code
+
+    await page.evaluate(_REVEAL_HIDDEN_JS)
+    await page.wait_for_timeout(200)
+    return await find_code(page, used_codes)
+
+
+async def _try_sequence_actions(
+    page: "Page", used_codes: set[str]
+) -> str | None:
+    """Programmatic fallback: complete a sequence challenge using Playwright actions."""
+    print("[agent] Sequence fallback: attempting all 4 actions via Playwright")
+
+    # Diagnose: what does the challenge page look like?
+    diag = await page.evaluate("""
+        () => {
+            const info = { buttons: [], inputs: [], hoverTargets: [], pageText: '' };
+            for (const btn of document.querySelectorAll('button')) {
+                if (btn.offsetParent !== null) {
+                    info.buttons.push(btn.textContent.trim().slice(0, 50));
+                }
+            }
+            for (const inp of document.querySelectorAll('input, textarea')) {
+                if (inp.offsetParent !== null) {
+                    info.inputs.push({type: inp.type, placeholder: inp.placeholder, value: inp.value});
+                }
+            }
+            // Find hover candidates: visible elements with cursor:pointer that aren't buttons/links/inputs
+            for (const el of document.querySelectorAll('div, section, span, p')) {
+                if (el.offsetParent === null) continue;
+                const style = window.getComputedStyle(el);
+                const rect = el.getBoundingClientRect();
+                if (rect.width < 20 || rect.height < 20) continue;
+                if (style.cursor === 'pointer' || el.classList.contains('cursor-pointer')) {
+                    const text = (el.textContent || '').trim().slice(0, 60);
+                    info.hoverTargets.push({
+                        tag: el.tagName, text, w: Math.round(rect.width),
+                        h: Math.round(rect.height), cursor: style.cursor,
+                        bg: style.backgroundColor, childCount: el.children.length
+                    });
+                }
+            }
+            info.pageText = (document.body.innerText || '').slice(0, 500);
+            return info;
+        }
+    """)
+    print(f"[agent] Sequence diag: buttons={diag.get('buttons')}")
+    print(f"[agent] Sequence diag: inputs={diag.get('inputs')}")
+    print(f"[agent] Sequence diag: hoverTargets={diag.get('hoverTargets')}")
+
+    # 1. Click the action button
+    for label in ["Click Me", "Click", "Click Here", "Press Me"]:
+        try:
+            btn = page.get_by_role("button", name=label, exact=False).first
+            if await btn.is_visible(timeout=300):
+                await btn.click(timeout=1000, force=True)
+                print(f"[agent] Sequence: clicked '{label}'")
+                break
+        except Exception:
+            continue
+    await page.wait_for_timeout(300)
+
+    # 2. Fill the text input FIRST (before hover, in case order matters)
+    for selector in ["input[type='text']", "input:not([type='hidden']):not([type='submit'])", "textarea"]:
+        try:
+            inp = page.locator(selector).first
+            if await inp.is_visible(timeout=300):
+                await inp.click(timeout=500)
+                await inp.fill("hello")
+                # Also try keyboard input as backup
+                await inp.press("a")
+                await page.wait_for_timeout(100)
+                print("[agent] Sequence: filled input with 'hello'")
+                break
+        except Exception:
+            continue
+    await page.wait_for_timeout(300)
+
+    # 3. Hover — try ALL cursor:pointer divs, not just the "best" one
+    hover_targets = diag.get("hoverTargets", [])
+    for target_info in hover_targets:
+        hover_box = await page.evaluate("""
+            (searchText) => {
+                for (const el of document.querySelectorAll('div, section, span, p')) {
+                    if (el.offsetParent === null) continue;
+                    const style = window.getComputedStyle(el);
+                    if (style.cursor !== 'pointer') continue;
+                    const text = (el.textContent || '').trim().slice(0, 60);
+                    if (text === searchText) {
+                        const rect = el.getBoundingClientRect();
+                        return {x: rect.x + rect.width/2, y: rect.y + rect.height/2, tag: el.tagName, text};
+                    }
+                }
+                return null;
+            }
+        """, target_info.get("text", ""))
+        if hover_box:
+            try:
+                await page.mouse.move(hover_box["x"], hover_box["y"])
+                for i in range(20):
+                    await asyncio.sleep(0.15)
+                    await page.mouse.move(hover_box["x"] + (i % 3) - 1, hover_box["y"])
+                print(f"[agent] Sequence: hovered {hover_box['tag']} '{hover_box['text']}'")
+            except Exception as e:
+                print(f"[agent] Sequence: hover failed: {e}")
+    await page.wait_for_timeout(300)
+
+    # 4. Scroll down incrementally (to trigger scroll event listeners)
+    for _ in range(5):
+        await page.evaluate("window.scrollBy(0, 100)")
+        await page.wait_for_timeout(100)
+    print("[agent] Sequence: scrolled 500px")
+    await page.wait_for_timeout(500)
+
+    # Check for code
+    code = await find_code(page, used_codes)
+    if code:
+        return code
+
+    await page.evaluate(_REVEAL_HIDDEN_JS)
+    await page.wait_for_timeout(200)
+    return await find_code(page, used_codes)

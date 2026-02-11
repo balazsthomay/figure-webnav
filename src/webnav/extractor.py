@@ -71,30 +71,69 @@ async def find_code(page: Page, used_codes: set[str] | None = None) -> str | Non
 # Avoids expensive operations like getComputedStyle for pseudo-elements.
 _HIDDEN_CODE_SCAN_JS = """
 (() => {
-    const codeRe = /^[A-Z0-9]{6}$/;
+    const exactRe = /^[A-Z0-9]{6}$/;
+    const partialRe = /\\b([A-Z0-9]{6})\\b/;
     const fp = /^(SUBMIT|SCROLL|CLICKS?|REVEAL|BUTTON|HIDDEN|STEPBAR|STEP\\d+)$/;
 
-    // Single pass over all elements: check attributes + hidden text
+    // Pass 1a: Check all element attributes — exact match
     for (const el of document.querySelectorAll('*')) {
-        // Check key attributes
         for (const attr of el.attributes) {
-            if (codeRe.test(attr.value) && !fp.test(attr.value)) return attr.value;
+            if (exactRe.test(attr.value) && !fp.test(attr.value)) return attr.value;
         }
-        // Check hidden leaf text
+    }
+
+    // Pass 1b: Check data-* and aria-* attributes — partial match
+    for (const el of document.querySelectorAll('*')) {
+        for (const attr of el.attributes) {
+            if (attr.name === 'class' || attr.name === 'style' || attr.name === 'src') continue;
+            const m = attr.value.match(partialRe);
+            if (m && !fp.test(m[1])) return m[1];
+        }
+    }
+
+    // Pass 2: Check hidden leaf text (exact match)
+    for (const el of document.querySelectorAll('*')) {
         const text = (el.textContent || '').trim();
-        if (codeRe.test(text) && !fp.test(text) && el.childElementCount === 0) {
+        if (exactRe.test(text) && !fp.test(text) && el.childElementCount === 0) {
             return text;
         }
     }
 
-    // Check HTML comments
+    // Pass 3: Search within text of actually-hidden elements (partial match)
+    for (const el of document.querySelectorAll('*')) {
+        const style = window.getComputedStyle(el);
+        const hidden = style.display === 'none' || style.visibility === 'hidden' ||
+            style.opacity === '0' || style.color === 'rgba(0, 0, 0, 0)' ||
+            style.color === 'transparent' ||
+            (el.offsetWidth === 0 && el.offsetHeight === 0);
+        if (!hidden) continue;
+        const text = el.textContent || '';
+        const m = text.match(partialRe);
+        if (m && !fp.test(m[1])) return m[1];
+    }
+
+    // Pass 4: Check pseudo-element content
+    for (const el of document.querySelectorAll('*')) {
+        for (const pseudo of ['::before', '::after']) {
+            try {
+                const content = window.getComputedStyle(el, pseudo).content;
+                if (content && content !== 'none' && content !== 'normal') {
+                    const clean = content.replace(/['"]/g, '');
+                    const m = clean.match(partialRe);
+                    if (m && !fp.test(m[1])) return m[1];
+                }
+            } catch(e) {}
+        }
+    }
+
+    // Pass 5: HTML comments
     const walker = document.createTreeWalker(
         document.body, NodeFilter.SHOW_COMMENT, null, false
     );
     let comment;
     while (comment = walker.nextNode()) {
-        const m = (comment.textContent || '').match(/[A-Z0-9]{6}/);
-        if (m && !fp.test(m[0])) return m[0];
+        const m = (comment.textContent || '').match(partialRe);
+        if (m && !fp.test(m[1])) return m[1];
     }
 
     return null;

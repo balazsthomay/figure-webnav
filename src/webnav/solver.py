@@ -49,15 +49,19 @@ Respond with a JSON array of actions. Each action is an object:
 
 Think step by step about what the page is asking you to do. Common patterns:
 - "Click the button" → find the button in ELEMENTS, click it
+- "Click here N times" → find the element with "click here" text, click it with amount=N+1
 - "Scroll down N px" → scroll(N+100)
 - "Wait N seconds" → wait(N+2)
 - "Hover over element for N seconds" → hover the element with duration N+1
-- "Hidden in DOM" → use js() to reveal hidden elements, then look for codes
+- "Hidden in DOM" → use js() to search: document.querySelectorAll('*') checking attributes, hidden text, comments, pseudo-elements for 6-char codes
 - "Drag pieces into slots" → drag each draggable to its target
 - "Draw on canvas" → draw_strokes on the canvas element
 - "Press keys in sequence" → read the required keys from PAGE_TEXT, use key_sequence
 - "Solve the puzzle" → read the math expression from PAGE_TEXT, compute answer, fill the answer input
+- "Sequence Challenge: Complete all N actions" → do each action: click the button, hover the BOX/DIV element (NOT the input), fill the input with "hello", scroll(500). The hover target is usually a div with "hover" text or cursor-pointer styling — NOT the text input.
 - If a code is already visible in VISIBLE_CODES, no action needed (agent will submit it)
+- When the instruction says "click here", the clickable element is usually the one containing that instruction text
+- For fill actions, ALWAYS provide the "text" field. If the page doesn't specify what to type, use "hello"
 
 Return ONLY the JSON array, no explanation."""
 
@@ -191,13 +195,25 @@ def _parse_actions(raw: str) -> list[Action]:
         if action_type not in valid_actions:
             continue
 
+        # Safely coerce element/to_element to int
+        try:
+            raw_el = item.get("element")
+            element = int(raw_el) if raw_el is not None else None
+        except (ValueError, TypeError):
+            element = None
+        try:
+            raw_to = item.get("to_element")
+            to_element = int(raw_to) if raw_to is not None else None
+        except (ValueError, TypeError):
+            to_element = None
+
         actions.append(Action(
             type=action_type,
-            element=item.get("element"),
+            element=element,
             selector=item.get("selector", ""),
             value=item.get("text") or item.get("value") or item.get("code") or item.get("key") or item.get("keys") or "",
             amount=int(item.get("amount") or item.get("seconds") or 0),
-            to_element=item.get("to_element"),
+            to_element=to_element,
             duration=float(item.get("duration") or 0),
         ))
     return actions

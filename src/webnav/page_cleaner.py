@@ -10,10 +10,8 @@ from playwright.async_api import Page
 # - Does NOT remove() elements to avoid breaking the React app
 CLEANUP_JS = """
 (() => {
-  // Two-pass overlay clearing:
-  // 1. Full-screen overlays (backdrops) → display:none
-  // 2. Smaller overlays (popups) → pointer-events:none (so clicks pass through)
-  // Challenge elements (non-fixed, non-absolute) are NOT affected.
+  // Overlay clearing for popups and modal backdrops.
+  // Challenge elements (non-fixed, non-absolute, lower z-index) are NOT affected.
   // IMPORTANT: Preserve elements containing 6-char codes or "Code revealed"
   const codeRe = /[A-Z0-9]{6}/;
   document.querySelectorAll('*').forEach(el => {
@@ -28,12 +26,8 @@ CLEANUP_JS = """
         el.style.setProperty('pointer-events', 'none', 'important');
         return;
       }
-      const r = el.getBoundingClientRect();
-      if (r.width > window.innerWidth * 0.8 && r.height > window.innerHeight * 0.8) {
-        el.style.setProperty('display', 'none', 'important');
-      } else {
-        el.style.setProperty('pointer-events', 'none', 'important');
-      }
+      // Hide ALL overlay elements (both large backdrops and small popups)
+      el.style.setProperty('display', 'none', 'important');
     }
   });
   window.scrollTo(0, 0);

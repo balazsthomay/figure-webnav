@@ -116,6 +116,8 @@ _INDEX_ELEMENTS_JS = """
         // Skip invisible elements (zero size or off-screen)
         if (rect.width < 2 || rect.height < 2) continue;
         if (rect.bottom < 0 || rect.top > window.innerHeight * 3) continue;
+        // Skip elements hidden by page cleaner (display:none on ancestor)
+        if (el.offsetParent === null && el.tagName !== 'BODY' && el.tagName !== 'HTML') continue;
 
         // Build a unique selector
         let uniqueSelector = '';

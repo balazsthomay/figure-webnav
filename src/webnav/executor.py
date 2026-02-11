@@ -43,7 +43,7 @@ async def run(
             case "scroll":
                 return await _do_scroll(page, action)
             case "wait":
-                await asyncio.sleep(action.amount)
+                await asyncio.sleep(min(action.amount, 15))  # Cap at 15s
                 return True
             case "press":
                 await page.keyboard.press(action.value)
@@ -236,36 +236,112 @@ async def _do_scroll(page: Page, action: Action) -> bool:
 
 
 async def _do_hover(page: Page, action: Action, elements: list[ElementInfo]) -> bool:
-    """Hover over an element by index with sustained JS events."""
-    duration_ms = int((action.duration or 3) * 1000)
+    """Hover over an element by index with real Playwright mouse + JS event dispatch."""
+    duration_secs = min(action.duration or 3, 10)  # Cap at 10s
 
-    # Index-based: get element selector for JS hover
+    # Strategy 1: Playwright real hover (most reliable for React event listeners)
+    hover_loc = None
+
+    # Try index-based element first
+    if action.element is not None and action.element < len(elements):
+        loc = _resolve_element(page, action, elements)
+        if loc:
+            try:
+                if await loc.is_visible(timeout=500):
+                    hover_loc = loc
+            except Exception:
+                pass
+
+    # Fallback: find hover target by common selectors
+    if hover_loc is None:
+        for selector in [
+            "[class*='cursor-pointer']",
+            "text='Hover here'",
+            "text='Hover Here'",
+            "text='Hover over'",
+        ]:
+            try:
+                loc = page.locator(selector).first
+                if await loc.is_visible(timeout=300):
+                    hover_loc = loc
+                    break
+            except (PlaywrightTimeout, Exception):
+                continue
+
+    # Fallback: find any div/section with "hover" in text
+    if hover_loc is None:
+        try:
+            box = await page.evaluate("""
+                () => {
+                    for (const el of document.querySelectorAll('div, section, span, p')) {
+                        const text = (el.textContent || '').toLowerCase();
+                        if ((text.includes('hover here') || text.includes('hover over'))
+                            && el.children.length <= 3 && el.offsetParent !== null) {
+                            const r = el.getBoundingClientRect();
+                            if (r.width > 20 && r.height > 20) {
+                                return {x: r.x + r.width/2, y: r.y + r.height/2, tag: el.tagName};
+                            }
+                        }
+                    }
+                    // Try any cursor-pointer element
+                    for (const el of document.querySelectorAll('*')) {
+                        const style = window.getComputedStyle(el);
+                        if (style.cursor === 'pointer' && el.offsetParent !== null
+                            && el.tagName !== 'BUTTON' && el.tagName !== 'A' && el.tagName !== 'INPUT') {
+                            const r = el.getBoundingClientRect();
+                            if (r.width > 30 && r.height > 30 && r.width < 500) {
+                                return {x: r.x + r.width/2, y: r.y + r.height/2, tag: el.tagName};
+                            }
+                        }
+                    }
+                    return null;
+                }
+            """)
+            if box:
+                # Use raw mouse positioning for sustained hover
+                await page.mouse.move(box["x"], box["y"])
+                print(f"[executor] Hover: mouse at ({box['x']:.0f}, {box['y']:.0f}) on {box['tag']}")
+                # Hold position with micro-movements for duration
+                for i in range(int(duration_secs * 5)):
+                    await asyncio.sleep(0.2)
+                    await page.mouse.move(box["x"] + (i % 3) - 1, box["y"])
+                print(f"[executor] Hover: held {duration_secs}s via mouse positioning")
+                return True
+        except Exception as e:
+            print(f"[executor] Hover coordinate fallback failed: {e}")
+
+    if hover_loc:
+        try:
+            await hover_loc.hover(force=True)
+            # Sustained hover with micro-movements
+            box = await hover_loc.bounding_box()
+            if box:
+                cx, cy = box["x"] + box["width"] / 2, box["y"] + box["height"] / 2
+                for i in range(int(duration_secs * 5)):
+                    await asyncio.sleep(0.2)
+                    await page.mouse.move(cx + (i % 3) - 1, cy)
+            else:
+                await asyncio.sleep(duration_secs)
+            print(f"[executor] Hover: Playwright hover held {duration_secs}s")
+            return True
+        except Exception as e:
+            print(f"[executor] Playwright hover failed: {e}")
+
+    # JS event dispatch fallback
+    duration_ms = int(duration_secs * 1000)
     target_selector = None
     if action.element is not None and action.element < len(elements):
         target_selector = elements[action.element].selector
 
-    # JS sustained hover — dispatches mouse events for the full duration
     hover_js = f"""
     (async () => {{
         let target = null;
-        // Try specific selector first
         const sel = {json.dumps(target_selector) if target_selector else 'null'};
-        if (sel) {{
-            target = document.querySelector(sel);
-        }}
-        // Fallback: find hover target by text
+        if (sel) target = document.querySelector(sel);
         if (!target) {{
-            for (const el of document.querySelectorAll('[class*="cursor-pointer"]')) {{
+            for (const el of document.querySelectorAll('div, section, span, p')) {{
                 const text = (el.textContent || '').toLowerCase();
-                if (text.includes('hover') && el.offsetParent !== null) {{
-                    target = el; break;
-                }}
-            }}
-        }}
-        if (!target) {{
-            for (const el of document.querySelectorAll('div, p, span, section')) {{
-                const text = (el.textContent || '').toLowerCase();
-                if ((text.includes('hover here') || text.includes('hover over this'))
+                if ((text.includes('hover here') || text.includes('hover over'))
                     && el.children.length <= 3 && el.offsetParent !== null) {{
                     target = el; break;
                 }}
@@ -275,28 +351,20 @@ async def _do_hover(page: Page, action: Action, elements: list[ElementInfo]) -> 
         const rect = target.getBoundingClientRect();
         const cx = rect.x + rect.width / 2;
         const cy = rect.y + rect.height / 2;
-        const events = ['pointerenter', 'pointerover', 'mouseenter', 'mouseover', 'mousemove'];
-        events.forEach(evt => {{
+        ['pointerenter','pointerover','mouseenter','mouseover','mousemove'].forEach(evt => {{
             target.dispatchEvent(new PointerEvent(evt, {{
-                bubbles: true, cancelable: true,
-                clientX: cx, clientY: cy, pointerType: 'mouse'
+                bubbles:true, cancelable:true, clientX:cx, clientY:cy, pointerType:'mouse'
             }}));
         }});
-        const duration = {duration_ms};
         let elapsed = 0;
-        while (elapsed < duration) {{
+        while (elapsed < {duration_ms}) {{
             await new Promise(r => setTimeout(r, 100));
             elapsed += 100;
             target.dispatchEvent(new PointerEvent('pointermove', {{
-                bubbles: true, cancelable: true,
-                clientX: cx + (elapsed % 3), clientY: cy, pointerType: 'mouse'
-            }}));
-            target.dispatchEvent(new MouseEvent('mousemove', {{
-                bubbles: true, cancelable: true,
-                clientX: cx + (elapsed % 3), clientY: cy
+                bubbles:true, cancelable:true, clientX:cx+(elapsed%3), clientY:cy, pointerType:'mouse'
             }}));
         }}
-        return 'hover: held ' + duration + 'ms on ' + target.tagName;
+        return 'hover: JS held ' + {duration_ms} + 'ms on ' + target.tagName;
     }})()
     """
     try:
@@ -305,32 +373,6 @@ async def _do_hover(page: Page, action: Action, elements: list[ElementInfo]) -> 
         return True
     except Exception as e:
         print(f"[executor] JS hover failed: {e}")
-
-    # Playwright fallback
-    if action.element is not None:
-        loc = _resolve_element(page, action, elements)
-        if loc:
-            try:
-                await loc.hover(force=True)
-                await asyncio.sleep(action.duration or 3)
-                return True
-            except Exception:
-                pass
-
-    # Text-based fallback
-    for selector in [
-        "text='Hover here to reveal code'",
-        "text='Hover here'",
-        "[class*='cursor-pointer']",
-    ]:
-        try:
-            loc = page.locator(selector).first
-            if await loc.is_visible(timeout=500):
-                await loc.hover(force=True)
-                await asyncio.sleep(action.duration or 3)
-                return True
-        except (PlaywrightTimeout, Exception):
-            continue
     return False
 
 
