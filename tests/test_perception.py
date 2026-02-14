@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+from unittest.mock import AsyncMock, MagicMock
+
 import pytest
 
 from webnav.perception import (
     CODE_PATTERN,
+    ElementInfo,
     PageState,
     _extract_codes,
     _extract_instruction,
@@ -14,6 +17,7 @@ from webnav.perception import (
     _extract_step_number,
     _parse_yaml_to_nodes,
     _walk_tree,
+    index_elements,
     snapshot,
 )
 from tests.conftest import (
@@ -194,6 +198,103 @@ class TestExtractStepNumber:
         assert step == 1  # From "Challenge Step 1"
 
 
+class TestElementInfo:
+    def test_creates_with_defaults(self):
+        el = ElementInfo(index=0, tag="button")
+        assert el.index == 0
+        assert el.tag == "button"
+        assert el.role == ""
+        assert el.name == ""
+        assert el.selector == ""
+        assert el.visible is True
+        assert el.bbox is None
+
+    def test_creates_with_all_fields(self):
+        el = ElementInfo(
+            index=5,
+            tag="input",
+            role="textbox",
+            name="Enter code",
+            type="text",
+            placeholder="6-char code",
+            selector="#code-input",
+            visible=True,
+            bbox={"x": 10, "y": 20, "width": 200, "height": 30},
+        )
+        assert el.index == 5
+        assert el.type == "text"
+        assert el.placeholder == "6-char code"
+        assert el.bbox["width"] == 200
+
+
+class TestIndexElements:
+    @pytest.mark.asyncio
+    async def test_parses_valid_element_list(self):
+        page = make_mock_page()
+        page.evaluate = AsyncMock(return_value=[
+            {
+                "index": 0,
+                "tag": "button",
+                "role": "button",
+                "name": "Reveal Code",
+                "type": "",
+                "placeholder": "",
+                "selector": "button:nth-of-type(1)",
+                "visible": True,
+                "bbox": {"x": 10, "y": 20, "width": 100, "height": 40},
+            },
+            {
+                "index": 1,
+                "tag": "input",
+                "role": "",
+                "name": "",
+                "type": "text",
+                "placeholder": "Enter code",
+                "selector": "input:nth-of-type(1)",
+                "visible": True,
+                "bbox": {"x": 10, "y": 80, "width": 200, "height": 30},
+            },
+        ])
+        elements = await index_elements(page)
+        assert len(elements) == 2
+        assert elements[0].tag == "button"
+        assert elements[0].name == "Reveal Code"
+        assert elements[1].tag == "input"
+        assert elements[1].placeholder == "Enter code"
+
+    @pytest.mark.asyncio
+    async def test_handles_evaluate_exception(self):
+        page = make_mock_page()
+        page.evaluate = AsyncMock(side_effect=Exception("JS error"))
+        elements = await index_elements(page)
+        assert elements == []
+
+    @pytest.mark.asyncio
+    async def test_handles_non_list_result(self):
+        page = make_mock_page()
+        page.evaluate = AsyncMock(return_value=None)
+        elements = await index_elements(page)
+        assert elements == []
+
+    @pytest.mark.asyncio
+    async def test_handles_empty_list(self):
+        page = make_mock_page()
+        page.evaluate = AsyncMock(return_value=[])
+        elements = await index_elements(page)
+        assert elements == []
+
+    @pytest.mark.asyncio
+    async def test_skips_non_dict_items(self):
+        page = make_mock_page()
+        page.evaluate = AsyncMock(return_value=[
+            {"index": 0, "tag": "button", "name": "OK", "selector": "button"},
+            "invalid",
+            42,
+        ])
+        elements = await index_elements(page)
+        assert len(elements) == 1
+
+
 class TestPageStatePrompt:
     def test_renders_compact_prompt(self):
         state = PageState(
@@ -212,6 +313,31 @@ class TestPageStatePrompt:
         state = PageState(step=1, aria_yaml="- button \"Test\"")
         prompt = state.to_prompt()
         assert "ARIA_TREE" in prompt
+
+    def test_renders_indexed_elements(self):
+        elements = [
+            ElementInfo(index=0, tag="button", name="Reveal Code", selector="button:nth-of-type(1)"),
+            ElementInfo(index=1, tag="input", type="text", placeholder="Enter code", selector="input:nth-of-type(1)"),
+            ElementInfo(index=2, tag="canvas", role="img", selector="canvas"),
+        ]
+        state = PageState(step=1, instruction="Click the button", elements=elements)
+        prompt = state.to_prompt()
+        assert "ELEMENTS:" in prompt
+        assert '[0] button "Reveal Code"' in prompt
+        assert "[1] input type=text" in prompt
+        assert 'placeholder="Enter code"' in prompt
+        assert "[2] canvas role=img" in prompt
+
+    def test_filters_noise_from_page_text(self):
+        state = PageState(
+            step=1,
+            instruction="Click the button",
+            raw_text="Click the button below\nLorem ipsum dolor sit amet\nContent Block Loaded\nYour code is: AB3F9X",
+        )
+        prompt = state.to_prompt()
+        assert "Lorem ipsum" not in prompt
+        assert "Content Block Loaded" not in prompt
+        assert "AB3F9X" in prompt
 
 
 class TestCodePattern:
@@ -258,7 +384,6 @@ async def test_snapshot_with_fallback_instruction():
 @pytest.mark.asyncio
 async def test_snapshot_handles_aria_exception():
     """Test snapshot gracefully handles aria_snapshot failure."""
-    from unittest.mock import AsyncMock, MagicMock
     page = make_mock_page(
         url="https://serene-frangipane-7fd25b.netlify.app/step1?version=2",
         inner_text="Click the button to reveal code",
@@ -282,3 +407,5 @@ async def test_snapshot_integration():
     assert state.step == 3
     assert "wait" in state.instruction.lower()
     assert "AB3F9X" in state.visible_codes
+    # Elements list is populated (may be empty if evaluate returns None)
+    assert isinstance(state.elements, list)

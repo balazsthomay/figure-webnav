@@ -34,6 +34,18 @@ class BrowserController:
         self._context = await self._browser.new_context(
             viewport={"width": 1280, "height": 720},
         )
+        # Inject shadow root capture BEFORE any page JS runs.
+        # This intercepts attachShadow() to store references even for closed roots.
+        await self._context.add_init_script("""
+            (() => {
+                const _origAttachShadow = Element.prototype.attachShadow;
+                Element.prototype.attachShadow = function(init) {
+                    const shadow = _origAttachShadow.call(this, init);
+                    this.__shadow = shadow;
+                    return shadow;
+                };
+            })();
+        """)
         self._page = await self._context.new_page()
         self._page.on("dialog", self._handle_dialog)
         return self

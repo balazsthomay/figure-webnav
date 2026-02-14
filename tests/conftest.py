@@ -149,6 +149,11 @@ def make_mock_page(
     page.goto = AsyncMock()
     page.keyboard = MagicMock()
     page.keyboard.press = AsyncMock()
+    page.mouse = MagicMock()
+    page.mouse.move = AsyncMock()
+    page.mouse.down = AsyncMock()
+    page.mouse.up = AsyncMock()
+    page.mouse.wheel = AsyncMock()
 
     # Locator support — must handle both general locators and body aria_snapshot
     mock_locator = MagicMock()

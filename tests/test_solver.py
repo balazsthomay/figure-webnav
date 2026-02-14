@@ -6,31 +6,66 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from webnav.perception import PageState
+from webnav.perception import PageState, ElementInfo
 from webnav.solver import Solver, _parse_actions
 
 
 class TestParseActions:
-    def test_parses_click_action(self):
-        raw = '[{"type": "click", "selector": "button:has-text(\'Reveal\')"}]'
+    def test_parses_click_with_element_index(self):
+        raw = '[{"action": "click", "element": 3}]'
         actions = _parse_actions(raw)
         assert len(actions) == 1
         assert actions[0].type == "click"
-        assert "Reveal" in actions[0].selector
+        assert actions[0].element == 3
+
+    def test_parses_fill_with_element_and_text(self):
+        raw = '[{"action": "fill", "element": 7, "text": "hello"}]'
+        actions = _parse_actions(raw)
+        assert len(actions) == 1
+        assert actions[0].type == "fill"
+        assert actions[0].element == 7
+        assert actions[0].value == "hello"
 
     def test_parses_scroll_action(self):
-        raw = '[{"type": "scroll", "amount": 500}]'
+        raw = '[{"action": "scroll", "amount": 500}]'
         actions = _parse_actions(raw)
         assert actions[0].type == "scroll"
         assert actions[0].amount == 500
 
+    def test_parses_hover_with_duration(self):
+        raw = '[{"action": "hover", "element": 5, "duration": 3.5}]'
+        actions = _parse_actions(raw)
+        assert actions[0].type == "hover"
+        assert actions[0].element == 5
+        assert actions[0].duration == 3.5
+
+    def test_parses_drag_with_elements(self):
+        raw = '[{"action": "drag", "from_element": 2, "to_element": 8}]'
+        actions = _parse_actions(raw)
+        assert actions[0].type == "drag"
+        # from_element is parsed as "element" field via item.get("element")
+        # to_element is parsed directly
+        assert actions[0].to_element == 8
+
+    def test_parses_wait_with_seconds(self):
+        raw = '[{"action": "wait", "seconds": 5}]'
+        actions = _parse_actions(raw)
+        assert actions[0].type == "wait"
+        assert actions[0].amount == 5
+
+    def test_parses_key_sequence(self):
+        raw = '[{"action": "key_sequence", "keys": "ArrowUp ArrowDown"}]'
+        actions = _parse_actions(raw)
+        assert actions[0].type == "key_sequence"
+        assert actions[0].value == "ArrowUp ArrowDown"
+
     def test_parses_multiple_actions(self):
-        raw = '[{"type": "click", "selector": "btn"}, {"type": "wait", "amount": 2}]'
+        raw = '[{"action": "click", "element": 0}, {"action": "scroll", "amount": 600}]'
         actions = _parse_actions(raw)
         assert len(actions) == 2
 
     def test_strips_code_fences(self):
-        raw = '```json\n[{"type": "click", "selector": "btn"}]\n```'
+        raw = '```json\n[{"action": "click", "element": 0}]\n```'
         actions = _parse_actions(raw)
         assert len(actions) == 1
 
@@ -43,20 +78,62 @@ class TestParseActions:
         assert actions == []
 
     def test_filters_invalid_types(self):
-        raw = '[{"type": "destroy", "selector": "everything"}]'
+        raw = '[{"action": "destroy", "element": 0}]'
         actions = _parse_actions(raw)
         assert actions == []
 
     def test_wraps_single_object(self):
-        raw = '{"type": "click", "selector": "btn"}'
+        raw = '{"action": "click", "element": 0}'
         actions = _parse_actions(raw)
         assert len(actions) == 1
 
     def test_handles_js_action(self):
-        raw = '[{"type": "js", "value": "alert(1)"}]'
+        raw = '[{"action": "js", "code": "document.title"}]'
         actions = _parse_actions(raw)
         assert actions[0].type == "js"
-        assert actions[0].value == "alert(1)"
+        assert actions[0].value == "document.title"
+
+    # Backward compat: "type" key still works
+    def test_parses_type_key_click(self):
+        raw = '[{"type": "click", "selector": "button:has-text(\'Reveal\')"}]'
+        actions = _parse_actions(raw)
+        assert len(actions) == 1
+        assert actions[0].type == "click"
+        assert "Reveal" in actions[0].selector
+
+    def test_normalizes_canvas_draw(self):
+        raw = '[{"action": "canvas_draw", "element": 4}]'
+        actions = _parse_actions(raw)
+        assert actions[0].type == "draw_strokes"
+
+    def test_normalizes_drag_fill(self):
+        raw = '[{"action": "drag_fill"}]'
+        actions = _parse_actions(raw)
+        assert actions[0].type == "drag"
+
+    def test_parses_click_with_amount(self):
+        raw = '[{"action": "click", "element": 3, "amount": 5}]'
+        actions = _parse_actions(raw)
+        assert actions[0].element == 3
+        assert actions[0].amount == 5
+
+    def test_parses_press_with_key(self):
+        raw = '[{"action": "press", "key": "Enter"}]'
+        actions = _parse_actions(raw)
+        assert actions[0].type == "press"
+        assert actions[0].value == "Enter"
+
+    def test_value_extraction_priority(self):
+        """text > value > code > key > keys for value field."""
+        raw = '[{"action": "fill", "element": 1, "text": "primary", "value": "secondary"}]'
+        actions = _parse_actions(raw)
+        assert actions[0].value == "primary"
+
+    def test_draw_strokes(self):
+        raw = '[{"action": "draw_strokes", "element": 4}]'
+        actions = _parse_actions(raw)
+        assert actions[0].type == "draw_strokes"
+        assert actions[0].element == 4
 
 
 class TestSolverInit:
@@ -75,7 +152,7 @@ class TestSolverSolve:
         solver = Solver()
         mock_response = MagicMock()
         mock_response.choices = [MagicMock()]
-        mock_response.choices[0].message.content = '[{"type": "click", "selector": "btn"}]'
+        mock_response.choices[0].message.content = '[{"action": "click", "element": 0}]'
         mock_response.usage = MagicMock()
         mock_response.usage.total_tokens = 100
 
@@ -86,6 +163,7 @@ class TestSolverSolve:
 
         assert len(actions) == 1
         assert actions[0].type == "click"
+        assert actions[0].element == 0
         assert solver.total_calls == 1
         assert solver.total_tokens == 100
 
@@ -105,7 +183,7 @@ class TestSolverSolve:
         solver = Solver()
         mock_response = MagicMock()
         mock_response.choices = [MagicMock()]
-        mock_response.choices[0].message.content = '[{"type": "js", "value": "reveal()"}]'
+        mock_response.choices[0].message.content = '[{"action": "js", "code": "reveal()"}]'
         mock_response.usage = MagicMock()
         mock_response.usage.total_tokens = 200
 
@@ -121,3 +199,29 @@ class TestSolverSolve:
         messages = call_kwargs.kwargs.get("messages") or call_kwargs.args[0] if call_kwargs.args else call_kwargs.kwargs["messages"]
         user_msg = messages[-1]
         assert any(c.get("type") == "image_url" for c in user_msg["content"])
+
+    @pytest.mark.asyncio
+    @patch.dict("os.environ", {"OPENROUTER_API_KEY": "test-key"})
+    async def test_solve_sends_page_state_prompt(self):
+        """Verify that solve() sends the page state prompt to the LLM."""
+        solver = Solver()
+        mock_response = MagicMock()
+        mock_response.choices = [MagicMock()]
+        mock_response.choices[0].message.content = '[]'
+        mock_response.usage = MagicMock()
+        mock_response.usage.total_tokens = 50
+
+        solver._client.chat.completions.create = AsyncMock(return_value=mock_response)
+
+        elements = [
+            ElementInfo(index=0, tag="button", name="Reveal Code", selector="button:nth-of-type(1)"),
+        ]
+        state = PageState(step=1, instruction="Click the button", elements=elements)
+        await solver.solve(state)
+
+        call_kwargs = solver._client.chat.completions.create.call_args
+        messages = call_kwargs.kwargs["messages"]
+        user_msg = messages[-1]["content"]
+        assert "STEP: 1/30" in user_msg
+        assert "[0] button" in user_msg
+        assert "Reveal Code" in user_msg

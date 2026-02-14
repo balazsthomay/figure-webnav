@@ -6,8 +6,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from webnav.agent import Agent, _try_reveal_click, _REVEAL_LABELS
-from webnav.dispatcher import Action
+from webnav.agent import Agent
+from webnav.actions import Action
 from tests.conftest import (
     STEP1_ARIA_YAML,
     STEP3_ARIA_YAML_WITH_CODE,
@@ -37,7 +37,7 @@ class TestAgentSolveStep:
         page.wait_for_url = AsyncMock()
 
         agent.browser._page = page
-        result = await agent._solve_step(3)
+        result = await agent._solve_step(3, attempt=0, history=[])
         assert result is True
         assert agent.state.steps_completed == 1
 
@@ -72,7 +72,7 @@ class TestAgentSolveStep:
         mock_loc.click = mock_click
 
         agent.browser._page = page
-        result = await agent._solve_step(1)
+        result = await agent._solve_step(1, attempt=0, history=[])
         # The exact outcome depends on mock fidelity, but it should not crash
         assert isinstance(result, bool)
 
@@ -88,7 +88,7 @@ class TestAgentSolveStep:
         # Make page_cleaner's evaluate call raise
         page.evaluate = AsyncMock(side_effect=Exception("broken"))
         agent.browser._page = page
-        result = await agent._solve_step(1)
+        result = await agent._solve_step(1, attempt=0, history=[])
         assert result is False
         assert agent.state.steps_failed >= 1
 
@@ -105,44 +105,8 @@ class TestAgentSolveStep:
         # LLM returns no useful actions
         agent.solver.solve = AsyncMock(return_value=[])
         agent.browser._page = page
-        result = await agent._solve_step(1)
+        result = await agent._solve_step(1, attempt=0, history=[])
         assert result is False
-
-    @pytest.mark.asyncio
-    @patch.dict("os.environ", {"OPENROUTER_API_KEY": "test-key"})
-    async def test_solve_step_session_storage_fallback(self):
-        """When no code found normally, falls back to session storage."""
-        agent = Agent(headless=True)
-        page = make_mock_page(
-            url="https://serene-frangipane-7fd25b.netlify.app/step10?version=2",
-            inner_text="Puzzle Challenge: Solve this puzzle",
-            aria_yaml='- heading "Challenge Step 10"\n- paragraph "Puzzle Challenge: Solve this puzzle"',
-        )
-
-        eval_calls = 0
-
-        async def mock_eval(script):
-            nonlocal eval_calls
-            eval_calls += 1
-            # Session storage JS returns a code
-            if "sessionStorage" in str(script) and "wo_session" in str(script):
-                return "XK7F3Q"
-            return None
-
-        page.evaluate = AsyncMock(side_effect=mock_eval)
-        page.wait_for_url = AsyncMock()
-
-        # Simulate URL advancing after code submission
-        async def advancing_url(*args, **kwargs):
-            page.url = "https://serene-frangipane-7fd25b.netlify.app/step11?version=2"
-
-        mock_loc = page.locator.return_value
-        mock_loc.click = AsyncMock(side_effect=advancing_url)
-
-        agent.browser._page = page
-        result = await agent._solve_step(10)
-        # Should have found the code via session storage
-        assert isinstance(result, bool)
 
     @pytest.mark.asyncio
     @patch.dict("os.environ", {"OPENROUTER_API_KEY": "test-key"})
@@ -155,14 +119,33 @@ class TestAgentSolveStep:
             aria_yaml='- heading "Challenge Step 5"\n- paragraph "Something weird"',
         )
         agent.solver.solve_stuck = AsyncMock(
-            return_value=[Action(type="click", selector="button:has-text('Reveal')")]
+            return_value=[Action(type="click", element=0)]
         )
         page.wait_for_url = AsyncMock()
         agent.browser._page = page
 
-        result = await agent._solve_step(5, attempt=2)
+        result = await agent._solve_step(5, attempt=2, history=["attempt 1: failed", "attempt 2: failed"])
         assert isinstance(result, bool)
         agent.solver.solve_stuck.assert_called_once()
+
+    @pytest.mark.asyncio
+    @patch.dict("os.environ", {"OPENROUTER_API_KEY": "test-key"})
+    async def test_history_tracks_attempts(self):
+        """History list records what happened on each attempt."""
+        agent = Agent(headless=True)
+        page = make_mock_page(
+            url="https://serene-frangipane-7fd25b.netlify.app/step1?version=2",
+            inner_text="Some challenge",
+            aria_yaml='- heading "Challenge Step 1"',
+        )
+        agent.solver.solve = AsyncMock(return_value=[])
+        agent.browser._page = page
+
+        history: list[str] = []
+        await agent._solve_step(1, attempt=0, history=history)
+        assert len(history) == 1
+        assert "attempt 1" in history[0]
+        assert "no code found" in history[0]
 
 
 class TestSubmitAndCheck:
@@ -225,32 +208,6 @@ class TestWaitForContent:
         await agent._wait_for_content(timeout=0.3)
 
 
-class TestTryRevealClick:
-    @pytest.mark.asyncio
-    async def test_reveal_click_found(self):
-        page = make_mock_page()
-        page.evaluate = AsyncMock(return_value="Reveal Code")
-        await _try_reveal_click(page)
-        page.evaluate.assert_called_once()
-        page.wait_for_timeout.assert_called_with(300)
-
-    @pytest.mark.asyncio
-    async def test_reveal_click_none(self):
-        page = make_mock_page()
-        page.evaluate = AsyncMock(return_value=None)
-        await _try_reveal_click(page)
-        # Should not call wait_for_timeout after evaluate
-        page.wait_for_timeout.assert_not_called()
-
-
-class TestRevealLabels:
-    def test_labels_list(self):
-        """Ensure _REVEAL_LABELS has expected entries."""
-        assert "Reveal Code" in _REVEAL_LABELS
-        assert "Complete Challenge" in _REVEAL_LABELS
-        assert len(_REVEAL_LABELS) >= 5
-
-
 class TestAgentInit:
     @patch.dict("os.environ", {"OPENROUTER_API_KEY": "test-key"})
     def test_creates_components(self):
@@ -260,3 +217,11 @@ class TestAgentInit:
         assert agent.state is not None
         assert agent.metrics is not None
         assert agent._used_codes == set()
+
+    @patch.dict("os.environ", {"OPENROUTER_API_KEY": "test-key"})
+    def test_accepts_config(self):
+        from webnav.config import ChallengeConfig
+        config = ChallengeConfig(url="https://example.com", total_steps=10)
+        agent = Agent(headless=True, config=config)
+        assert agent.config.url == "https://example.com"
+        assert agent.config.total_steps == 10
