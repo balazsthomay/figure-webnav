@@ -22,7 +22,7 @@ _LABEL_RE = re.compile(r"^[\w\s]+:\s*$")
 CODE_PATTERN = re.compile(r"\b([A-Z0-9]{6})\b")
 
 # False-positive code patterns (common element IDs, CSS-like tokens)
-_FALSE_POSITIVE = re.compile(r"^(SUBMIT|SCROLL|CLICK[S]?|REVEAL|BUTTON|HIDDEN|STEPBAR|STEP\d+)$")
+_FALSE_POSITIVE = re.compile(r"^(SUBMIT|SCROLL|CLICK[S]?|REVEAL|BUTTON|HIDDEN|STEPBAR|STEP\d+|HELLOA|CANVAS|MOVING|COMPLE|DECODE|STRING|BASE64|PLEASE|SELECT|OPTION)$")
 
 
 @dataclass
@@ -38,6 +38,7 @@ class ElementInfo:
     selector: str = ""  # unique CSS selector for Playwright
     visible: bool = True
     bbox: dict[str, float] | None = None
+    extra: str = ""  # e.g. "scrollable", "clickable"
 
 
 @dataclass
@@ -77,6 +78,8 @@ class PageState:
                     desc += f" type={el.type}"
                 if el.placeholder:
                     desc += f' placeholder="{el.placeholder}"'
+                if el.extra:
+                    desc += f" [{el.extra}]"
                 elem_lines.append(desc)
             parts.append("ELEMENTS:\n" + "\n".join(elem_lines))
 
@@ -106,9 +109,116 @@ class PageState:
 # Returns a JSON-serializable array of element info dicts.
 _INDEX_ELEMENTS_JS = """
 (() => {
+    // Clear stale data-wnav attributes from previous indexing runs
+    document.querySelectorAll('[data-wnav]').forEach(el => el.removeAttribute('data-wnav'));
+
+    // Temporarily unhide clean_page-hidden containers so elements inside
+    // them are in the layout with valid bounding boxes for indexing.
+    const __noiseEls = document.querySelectorAll('[data-wnav-noise]');
+    __noiseEls.forEach(el => el.style.removeProperty('display'));
+
     const selector = 'a, button, input, select, textarea, canvas, ' +
-        '[role="button"], [draggable="true"], [onclick], [tabindex]';
-    const els = document.querySelectorAll(selector);
+        '[role="button"], [draggable="true"], [onclick], [tabindex], ' +
+        '[onmouseenter], [onmouseover], [style*="cursor"]';
+    const selectorEls = new Set(document.querySelectorAll(selector));
+
+    // Find elements with React event handlers (onClick, onMouseEnter, onPointerEnter, onScroll, etc.)
+    const reactTargets = 'div, span, section, p, li, article, main, aside, header, footer, figure, label';
+    for (const el of document.querySelectorAll(reactTargets)) {
+        const pk = Object.keys(el).find(k => k.startsWith('__reactProps'));
+        if (pk && el[pk]) {
+            const props = el[pk];
+            if (typeof props.onClick === 'function' ||
+                typeof props.onMouseEnter === 'function' ||
+                typeof props.onMouseOver === 'function' ||
+                typeof props.onPointerEnter === 'function' ||
+                typeof props.onPointerOver === 'function' ||
+                typeof props.onMouseDown === 'function' ||
+                typeof props.onScroll === 'function' ||
+                typeof props.onInput === 'function' ||
+                typeof props.onChange === 'function') {
+                selectorEls.add(el);
+            }
+        }
+    }
+
+    // Find elements with challenge action text (hover here, scroll inside, click me, type here)
+    // These may lack React handlers or cursor:pointer but are still interactive.
+    const actionTextRe = /\b(hover\s*(here|over|this)|scroll\s*inside|click\s*me|type\s*(here|in\s*this))\b/i;
+    for (const el of document.querySelectorAll('div, span, section, p')) {
+        if (selectorEls.has(el)) continue;
+        const text = (el.textContent || '').trim();
+        if (!actionTextRe.test(text)) continue;
+        if (el.childElementCount > 5) continue; // Skip large containers
+        const rect = el.getBoundingClientRect();
+        if (rect.width < 20 || rect.height < 20) continue;
+        const cs = getComputedStyle(el);
+        if (cs.display === 'none' || cs.visibility === 'hidden') continue;
+        selectorEls.add(el);
+    }
+
+    // Find scroll containers (overflow:auto/scroll with scrollable content)
+    for (const el of document.querySelectorAll('div, section, main, article, aside, ul, ol, nav')) {
+        if (selectorEls.has(el)) continue;
+        if (el.scrollHeight > el.clientHeight + 10) {
+            const cs = getComputedStyle(el);
+            const ov = cs.overflow + ' ' + cs.overflowY;
+            if (ov.includes('auto') || ov.includes('scroll')) {
+                selectorEls.add(el);
+            }
+        }
+    }
+
+    // Find cursor:pointer elements (non-standard interactive)
+    for (const el of document.querySelectorAll('div, span, section, p, li, label')) {
+        if (selectorEls.has(el)) continue;
+        const cs = getComputedStyle(el);
+        if (cs.cursor === 'pointer' && cs.display !== 'none' && cs.visibility !== 'hidden') {
+            const rect = el.getBoundingClientRect();
+            if (rect.width > 20 && rect.height > 20 && rect.width < 600) {
+                selectorEls.add(el);
+            }
+        }
+    }
+
+    // Shadow DOM traversal: find interactive elements inside shadow roots
+    // (both open via .shadowRoot and closed via .__shadow captured by browser.py)
+    function walkShadow(root, depth) {
+        if (!root || depth > 5) return;
+        for (const el of root.querySelectorAll('*')) {
+            const sr = el.shadowRoot || el.__shadow;
+            if (!sr) continue;
+            // Tag the host element so executor can find the shadow root
+            el.setAttribute('data-wnav-shadow-host', 'true');
+            const innerSelector = 'a, button, input, select, textarea, ' +
+                '[role="button"], [draggable="true"], [onclick], [tabindex]';
+            for (const inner of sr.querySelectorAll(innerSelector)) {
+                const cs = getComputedStyle(inner);
+                if (cs.display === 'none' || cs.visibility === 'hidden') continue;
+                const rect = inner.getBoundingClientRect();
+                if (rect.width < 2 || rect.height < 2) continue;
+                selectorEls.add(inner);
+                // Mark inner element with shadow host reference for executor
+                inner.__shadowHost = el;
+            }
+            // Also add any cursor:pointer elements inside shadow
+            for (const inner of sr.querySelectorAll('div, span, section, p')) {
+                if (selectorEls.has(inner)) continue;
+                const cs = getComputedStyle(inner);
+                if (cs.cursor === 'pointer' && cs.display !== 'none') {
+                    const rect = inner.getBoundingClientRect();
+                    if (rect.width > 20 && rect.height > 20) {
+                        selectorEls.add(inner);
+                        inner.__shadowHost = el;
+                    }
+                }
+            }
+            walkShadow(sr, depth + 1);
+        }
+    }
+    walkShadow(document, 0);
+
+    const els = selectorEls;
     const results = [];
     let idx = 0;
     for (const el of els) {
@@ -116,37 +226,45 @@ _INDEX_ELEMENTS_JS = """
         // Skip invisible elements (zero size or off-screen)
         if (rect.width < 2 || rect.height < 2) continue;
         if (rect.bottom < 0 || rect.top > window.innerHeight * 3) continue;
-        // Skip elements hidden by page cleaner (display:none on ancestor)
-        if (el.offsetParent === null && el.tagName !== 'BODY' && el.tagName !== 'HTML') continue;
+        // Skip truly hidden elements (visibility/display)
+        const cs = getComputedStyle(el);
+        if (cs.display === 'none' || cs.visibility === 'hidden') continue;
+        // Skip popup/noise elements with generic navigation text
+        const elText = (el.textContent || '').trim();
+        const noiseRe = /^(advance|continue|next|proceed|go forward|keep going|move on|next page|next step|next section|continue reading|continue journey|proceed forward|go|here!?|try this!?|button!?|link!?|moving!?)$/i;
+        if (noiseRe.test(elText)) continue;
 
-        // Build a unique selector
-        let uniqueSelector = '';
-        if (el.id) {
-            uniqueSelector = '#' + CSS.escape(el.id);
+        // Tag element with data attribute for reliable selection
+        el.setAttribute('data-wnav', String(idx));
+        let uniqueSelector;
+        // Shadow DOM elements need a JS-based selector since CSS selectors
+        // can't cross shadow boundaries from document.querySelector
+        if (el.__shadowHost) {
+            const hostIdx = el.__shadowHost.getAttribute('data-wnav-shadow-host') ? 'true' : '';
+            el.__shadowHost.setAttribute('data-wnav-host', String(idx));
+            uniqueSelector = 'shadow:' + idx;
         } else {
-            const tag = el.tagName.toLowerCase();
-            const parent = el.parentElement;
-            if (parent) {
-                const siblings = parent.querySelectorAll(':scope > ' + tag);
-                const nthIdx = Array.from(siblings).indexOf(el) + 1;
-                // Build a path: parent > tag:nth-of-type(n)
-                let parentSel = '';
-                if (parent.id) {
-                    parentSel = '#' + CSS.escape(parent.id);
-                } else {
-                    const pTag = parent.tagName.toLowerCase();
-                    const grandparent = parent.parentElement;
-                    if (grandparent) {
-                        const pSiblings = grandparent.querySelectorAll(':scope > ' + pTag);
-                        const pIdx = Array.from(pSiblings).indexOf(parent) + 1;
-                        parentSel = pTag + ':nth-of-type(' + pIdx + ')';
-                    } else {
-                        parentSel = pTag;
-                    }
-                }
-                uniqueSelector = parentSel + ' > ' + tag + ':nth-of-type(' + nthIdx + ')';
+            uniqueSelector = '[data-wnav="' + idx + '"]';
+        }
+
+        // Detect element characteristics
+        const isScrollable = el.scrollHeight > el.clientHeight + 10;
+        const isCursorPointer = cs.cursor === 'pointer' && el.tagName !== 'BUTTON' && el.tagName !== 'A';
+        let extra = '';
+        if (isScrollable) extra = 'scrollable';
+        if (isCursorPointer) extra += (extra ? ' ' : '') + 'clickable';
+
+        // Name: prefer textContent. For radio/checkbox buttons with no
+        // visible text, fall back to value/aria-label (needed for quiz puzzles).
+        // Do NOT use value for regular buttons — their value often contains
+        // form data, not display text, and creates false names for noise buttons.
+        let elName = (el.textContent || '').trim();
+        if (!elName) {
+            const role = el.getAttribute('role');
+            if (role === 'radio' || role === 'checkbox' || role === 'option') {
+                elName = el.getAttribute('value') || el.getAttribute('aria-label') || '';
             } else {
-                uniqueSelector = tag;
+                elName = el.getAttribute('aria-label') || el.getAttribute('title') || '';
             }
         }
 
@@ -154,15 +272,20 @@ _INDEX_ELEMENTS_JS = """
             index: idx,
             tag: el.tagName.toLowerCase(),
             role: el.getAttribute('role') || '',
-            name: (el.textContent || '').trim().substring(0, 80),
+            name: elName.substring(0, 80),
             type: el.getAttribute('type') || '',
             placeholder: el.getAttribute('placeholder') || '',
             selector: uniqueSelector,
             visible: el.offsetParent !== null || el.tagName === 'INPUT',
-            bbox: {x: rect.x, y: rect.y, width: rect.width, height: rect.height}
+            bbox: {x: rect.x, y: rect.y, width: rect.width, height: rect.height},
+            extra: extra
         });
         idx++;
     }
+
+    // Re-hide noise containers after indexing is complete
+    __noiseEls.forEach(el => el.style.setProperty('display', 'none', 'important'));
+
     return results;
 })()
 """
@@ -192,6 +315,7 @@ async def index_elements(page: Page) -> list[ElementInfo]:
             selector=item.get("selector", ""),
             visible=item.get("visible", True),
             bbox=item.get("bbox"),
+            extra=item.get("extra", ""),
         ))
     return elements
 

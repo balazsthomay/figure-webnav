@@ -14,7 +14,7 @@ class ChallengeConfig:
     total_steps: int = 30
     max_time: float = 290.0  # 4m50s safety margin
     max_step_time: float = 15.0
-    max_retries: int = 5
+    max_retries: int = 2
     code_pattern: re.Pattern[str] = field(
         default_factory=lambda: re.compile(r"\b([A-Z0-9]{6})\b")
     )

@@ -75,7 +75,7 @@ class TestRunAction:
         action = Action(type="scroll", amount=600)
         result = await run(page, action)
         assert result is True
-        page.evaluate.assert_called()
+        page.mouse.wheel.assert_called()
 
     @pytest.mark.asyncio
     async def test_wait_action(self):
@@ -145,7 +145,7 @@ class TestScrollAction:
         action = Action(type="scroll", amount=250)
         result = await run(page, action)
         assert result is True
-        assert page.evaluate.call_count >= 2
+        assert page.mouse.wheel.call_count >= 2
 
 
 class TestSelectAction:
@@ -374,41 +374,24 @@ class TestCanvasDrawAction:
     @pytest.mark.asyncio
     async def test_canvas_draw_success(self):
         page = make_mock_page()
-        mock_loc = page.locator.return_value
-        mock_loc.first = mock_loc
-        mock_loc.is_visible = AsyncMock(return_value=True)
-        mock_loc.bounding_box = AsyncMock(
-            return_value={"x": 50, "y": 50, "width": 400, "height": 300}
-        )
-        page.mouse = MagicMock()
-        page.mouse.move = AsyncMock()
-        page.mouse.down = AsyncMock()
-        page.mouse.up = AsyncMock()
-
+        page.evaluate = AsyncMock(return_value="ok: 4 strokes drawn on 400x200 canvas")
         action = Action(type="draw_strokes")
         result = await run(page, action)
         assert result is True
-        assert page.mouse.down.call_count == 5
+        page.evaluate.assert_called()
 
     @pytest.mark.asyncio
-    async def test_canvas_draw_not_visible(self):
+    async def test_canvas_draw_failure(self):
         page = make_mock_page()
-        mock_loc = page.locator.return_value
-        mock_loc.first = mock_loc
-        mock_loc.is_visible = AsyncMock(return_value=False)
-
+        page.evaluate = AsyncMock(return_value="no canvas found")
         action = Action(type="draw_strokes")
         result = await run(page, action)
         assert result is False
 
     @pytest.mark.asyncio
-    async def test_canvas_draw_no_bounding_box(self):
+    async def test_canvas_draw_exception(self):
         page = make_mock_page()
-        mock_loc = page.locator.return_value
-        mock_loc.first = mock_loc
-        mock_loc.is_visible = AsyncMock(return_value=True)
-        mock_loc.bounding_box = AsyncMock(return_value=None)
-
+        page.evaluate = AsyncMock(side_effect=Exception("broken"))
         action = Action(type="draw_strokes")
         result = await run(page, action)
         assert result is False
@@ -515,7 +498,7 @@ class TestActionException:
     @pytest.mark.asyncio
     async def test_top_level_exception_returns_false(self):
         page = make_mock_page()
-        page.evaluate = AsyncMock(side_effect=Exception("broken"))
+        page.mouse.wheel = AsyncMock(side_effect=Exception("broken"))
         action = Action(type="scroll", amount=100)
         result = await run(page, action)
         assert result is False

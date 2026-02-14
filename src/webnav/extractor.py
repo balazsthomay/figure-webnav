@@ -24,7 +24,7 @@ async def find_code(page: Page, used_codes: set[str] | None = None) -> str | Non
     green_code = await page.evaluate("""
         () => {
             const codeRe = /^[A-Z0-9]{6}$/;
-            const fp = /^(SUBMIT|SCROLL|CLICKS?|REVEAL|BUTTON|HIDDEN|STEPBAR|STEP\\d+)$/;
+            const fp = /^(SUBMIT|SCROLL|CLICKS?|REVEAL|BUTTON|HIDDEN|STEPBAR|STEP\\d+|HELLOA|CANVAS|MOVING|COMPLE|DECODE|STRING|BASE64|PLEASE|SELECT|OPTION)$/;
             // Strategy 1: Look for code inside green success containers
             const greens = document.querySelectorAll(
                 '.text-green-600, .text-green-700, [class*="bg-green"] span, [class*="bg-green"] p, [class*="bg-green"] div'
@@ -64,6 +64,27 @@ async def find_code(page: Page, used_codes: set[str] | None = None) -> str | Non
     if hidden_code and hidden_code not in skip:
         return hidden_code
 
+    # Fallback: scan Shadow DOM roots for codes (web components hide content)
+    shadow_code = await page.evaluate(_SHADOW_DOM_SCAN_JS)
+    if shadow_code and shadow_code not in skip:
+        return shadow_code
+
+    # Fallback: search all nested iframes for codes via Playwright frame API
+    for frame in page.frames[1:]:  # Skip main frame (already searched)
+        try:
+            frame_text = await frame.evaluate("() => document.body?.innerText || ''")
+            frame_candidates = [c for c in _extract_candidates(frame_text) if c not in skip]
+            if frame_candidates:
+                return frame_candidates[0]
+        except Exception:
+            continue
+
+    # Fallback: recursive JS search through iframe contentDocuments
+    # (catches same-origin iframes that Playwright may not enumerate)
+    iframe_code = await page.evaluate(_IFRAME_RECURSIVE_SCAN_JS)
+    if iframe_code and iframe_code not in skip:
+        return iframe_code
+
     return None
 
 
@@ -73,17 +94,19 @@ _HIDDEN_CODE_SCAN_JS = """
 (() => {
     const exactRe = /^[A-Z0-9]{6}$/;
     const partialRe = /\\b([A-Z0-9]{6})\\b/;
-    const fp = /^(SUBMIT|SCROLL|CLICKS?|REVEAL|BUTTON|HIDDEN|STEPBAR|STEP\\d+)$/;
+    const fp = /^(SUBMIT|SCROLL|CLICKS?|REVEAL|BUTTON|HIDDEN|STEPBAR|STEP\\d+|HELLOA|CANVAS|MOVING|COMPLE|DECODE|STRING|BASE64|PLEASE|SELECT|OPTION)$/;
 
-    // Pass 1a: Check all element attributes — exact match
+    // Pass 1a: Check all element attributes — exact match (skip noise)
     for (const el of document.querySelectorAll('*')) {
+        // No noise skip — extractor should check ALL elements for codes
         for (const attr of el.attributes) {
             if (exactRe.test(attr.value) && !fp.test(attr.value)) return attr.value;
         }
     }
 
-    // Pass 1b: Check data-* and aria-* attributes — partial match
+    // Pass 1b: Check data-* and aria-* attributes — partial match (skip noise)
     for (const el of document.querySelectorAll('*')) {
+        // No noise skip — extractor should check ALL elements for codes
         for (const attr of el.attributes) {
             if (attr.name === 'class' || attr.name === 'style' || attr.name === 'src') continue;
             const m = attr.value.match(partialRe);
@@ -91,16 +114,18 @@ _HIDDEN_CODE_SCAN_JS = """
         }
     }
 
-    // Pass 2: Check hidden leaf text (exact match)
+    // Pass 2: Check hidden leaf text (exact match) — skip noise elements
     for (const el of document.querySelectorAll('*')) {
+        // No noise skip — extractor should check ALL elements for codes
         const text = (el.textContent || '').trim();
         if (exactRe.test(text) && !fp.test(text) && el.childElementCount === 0) {
             return text;
         }
     }
 
-    // Pass 3: Search within text of actually-hidden elements (partial match)
+    // Pass 3: Search within text of actually-hidden elements (partial match) — skip noise
     for (const el of document.querySelectorAll('*')) {
+        // No noise skip — extractor should check ALL elements for codes
         const style = window.getComputedStyle(el);
         const hidden = style.display === 'none' || style.visibility === 'hidden' ||
             style.opacity === '0' || style.color === 'rgba(0, 0, 0, 0)' ||
@@ -137,6 +162,71 @@ _HIDDEN_CODE_SCAN_JS = """
     }
 
     return null;
+})()
+"""
+
+
+# Recursively search Shadow DOM roots for 6-char codes.
+# document.querySelectorAll('*') doesn't cross shadow boundaries;
+# we must explicitly traverse each element's shadowRoot.
+_SHADOW_DOM_SCAN_JS = """
+(() => {
+    const codeRe = /\\b([A-Z0-9]{6})\\b/;
+    const fp = /^(SUBMIT|SCROLL|CLICKS?|REVEAL|BUTTON|HIDDEN|STEPBAR|STEP\\d+|HELLOA|CANVAS|MOVING|COMPLE|DECODE|STRING|BASE64|PLEASE|SELECT|OPTION)$/;
+    function searchShadow(root, depth) {
+        if (!root || depth > 10) return null;
+        for (const el of root.querySelectorAll('*')) {
+            // Support both open (el.shadowRoot) and closed (__shadow) roots
+            const sr = el.shadowRoot || el.__shadow;
+            if (sr) {
+                const text = (sr.textContent || sr.innerHTML || '');
+                const m = text.match(codeRe);
+                if (m && !fp.test(m[1])) return m[1];
+                // Check attributes inside shadow root
+                for (const child of sr.querySelectorAll('*')) {
+                    for (const attr of child.attributes) {
+                        if (/^[A-Z0-9]{6}$/.test(attr.value) && !fp.test(attr.value))
+                            return attr.value;
+                    }
+                }
+                const deeper = searchShadow(sr, depth + 1);
+                if (deeper) return deeper;
+            }
+        }
+        return null;
+    }
+    return searchShadow(document, 0);
+})()
+"""
+
+
+# Recursively search same-origin iframes for 6-char codes.
+# Uses contentDocument to cross iframe boundaries from JS.
+_IFRAME_RECURSIVE_SCAN_JS = """
+(() => {
+    const codeRe = /\\b([A-Z0-9]{6})\\b/;
+    const fp = /^(SUBMIT|SCROLL|CLICKS?|REVEAL|BUTTON|HIDDEN|STEPBAR|STEP\\d+|HELLOA|CANVAS|MOVING|COMPLE|DECODE|STRING|BASE64|PLEASE|SELECT|OPTION)$/;
+    function search(doc, depth) {
+        if (!doc || depth > 10) return null;
+        const text = (doc.body?.innerText || '');
+        const m = text.match(codeRe);
+        if (m && !fp.test(m[1])) return m[1];
+        // Check attributes in this document
+        for (const el of doc.querySelectorAll('*')) {
+            for (const attr of el.attributes) {
+                if (/^[A-Z0-9]{6}$/.test(attr.value) && !fp.test(attr.value)) return attr.value;
+            }
+        }
+        // Recurse into iframes
+        for (const iframe of doc.querySelectorAll('iframe')) {
+            try {
+                const result = search(iframe.contentDocument, depth + 1);
+                if (result) return result;
+            } catch(e) {}
+        }
+        return null;
+    }
+    return search(document, 0);
 })()
 """
 

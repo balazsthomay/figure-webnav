@@ -19,14 +19,78 @@ from webnav.perception import ElementInfo
 def _resolve_element(
     page: Page, action: Action, elements: list[ElementInfo]
 ) -> Locator | None:
-    """Resolve an action's element index to a Playwright locator."""
+    """Resolve an action's element index to a Playwright locator.
+
+    Handles both regular CSS selectors and shadow DOM elements
+    (selector starts with 'shadow:').
+    """
     if action.element is None:
         return None
     if action.element < 0 or action.element >= len(elements):
         print(f"[executor] Element index {action.element} out of range (0-{len(elements)-1})")
         return None
     el = elements[action.element]
+    if el.selector.startswith("shadow:"):
+        # Shadow DOM element — use the host's data-wnav-host attribute
+        # to find the shadow root, then query inside it
+        idx = el.selector.split(":")[1]
+        # Use Playwright's >> pierce syntax for shadow DOM
+        return page.locator(f'[data-wnav-host="{idx}"] >> [data-wnav="{idx}"]').first
     return page.locator(el.selector).first
+
+
+async def _resolve_shadow_element_bbox(
+    page: Page, selector: str,
+) -> dict[str, float] | None:
+    """Get bounding box for a shadow DOM element via JS evaluation.
+
+    Fallback when Playwright's pierce selector doesn't work.
+    """
+    idx = selector.split(":")[1]
+    return await page.evaluate(f"""
+        (() => {{
+            const host = document.querySelector('[data-wnav-host="{idx}"]');
+            if (!host) return null;
+            const sr = host.shadowRoot || host.__shadow;
+            if (!sr) return null;
+            const el = sr.querySelector('[data-wnav="{idx}"]');
+            if (!el) return null;
+            const r = el.getBoundingClientRect();
+            return {{x: r.x, y: r.y, width: r.width, height: r.height}};
+        }})()
+    """)
+
+
+async def _unhide_noise_parent(page: Page, selector: str) -> None:
+    """If the target element or any ancestor is noise-hidden, unhide it.
+
+    The indexer captures elements inside clean_page-hidden containers
+    (it temporarily unhides during indexing). For execution, we need
+    to permanently unhide the specific container so Playwright can
+    interact with the element.
+
+    Also checks the element itself — clean_page Phase 3 marks some
+    floating divs directly with data-wnav-noise (not just parents).
+    """
+    await page.evaluate(f"""
+        (() => {{
+            const el = document.querySelector('{selector}');
+            if (!el) return;
+            // Check the element itself first
+            if (el.hasAttribute('data-wnav-noise')) {{
+                el.style.removeProperty('display');
+            }}
+            // Walk up ancestors
+            let parent = el.parentElement;
+            while (parent) {{
+                if (parent.hasAttribute('data-wnav-noise')) {{
+                    parent.style.removeProperty('display');
+                    break;
+                }}
+                parent = parent.parentElement;
+            }}
+        }})()
+    """)
 
 
 async def run(
@@ -34,6 +98,15 @@ async def run(
 ) -> bool:
     """Execute a single action on the page. Returns True if successful."""
     elems = elements or []
+
+    # Unhide noise container if the target element is inside one.
+    # The indexer captures elements inside hidden containers but they
+    # need to be visible for Playwright interaction.
+    if action.element is not None and 0 <= action.element < len(elems):
+        sel = elems[action.element].selector
+        if sel:
+            await _unhide_noise_parent(page, sel)
+
     try:
         match action.type:
             case "click":
@@ -41,7 +114,7 @@ async def run(
             case "fill":
                 return await _do_fill(page, action, elems)
             case "scroll":
-                return await _do_scroll(page, action)
+                return await _do_scroll(page, action, elems)
             case "wait":
                 await asyncio.sleep(min(action.amount, 15))  # Cap at 15s
                 return True
@@ -49,9 +122,19 @@ async def run(
                 await page.keyboard.press(action.value)
                 return True
             case "js":
-                result = await page.evaluate(action.value)
-                if result:
-                    print(f"[executor] JS returned: {str(result)[:100]}")
+                import asyncio as _aio
+                js_code = action.value
+                # Auto-wrap in IIFE if code has bare return statements
+                if "return " in js_code and not js_code.strip().startswith("("):
+                    js_code = f"(() => {{ {js_code} }})()"
+                try:
+                    result = await _aio.wait_for(
+                        page.evaluate(js_code), timeout=8.0
+                    )
+                    if result:
+                        print(f"[executor] JS returned: {str(result)[:100]}")
+                except _aio.TimeoutError:
+                    print("[executor] JS timed out after 8s")
                 return True
             case "hover":
                 return await _do_hover(page, action, elems)
@@ -138,13 +221,64 @@ async def _do_click(page: Page, action: Action, elements: list[ElementInfo]) -> 
         loc = _resolve_element(page, action, elements)
         if loc:
             try:
+                # Scroll into view first (force=True skips this)
+                try:
+                    await loc.scroll_into_view_if_needed(timeout=1000)
+                except Exception:
+                    pass
                 for _ in range(n_clicks):
                     await loc.click(timeout=2000, force=True)
                     if n_clicks > 1:
                         await page.wait_for_timeout(200)
+                # For non-standard elements (div, span, label, etc.),
+                # also do a JS .click() — Playwright mouse events sometimes
+                # don't trigger React handlers on these elements.
+                if action.element < len(elements):
+                    el_tag = elements[action.element].tag
+                    el_sel = elements[action.element].selector
+                    if el_tag in ("div", "span", "label", "section", "p") and el_sel:
+                        try:
+                            for _ in range(n_clicks):
+                                await page.evaluate(
+                                    f"document.querySelector('{el_sel}')?.click()"
+                                )
+                        except Exception:
+                            pass
                 return True
             except Exception as e:
                 print(f"[executor] Index click failed: {e}")
+                # Shadow DOM fallback: click via coordinates from JS bbox
+                if action.element < len(elements) and elements[action.element].selector.startswith("shadow:"):
+                    bbox = await _resolve_shadow_element_bbox(page, elements[action.element].selector)
+                    if bbox:
+                        cx = bbox["x"] + bbox["width"] / 2
+                        cy = bbox["y"] + bbox["height"] / 2
+                        for _ in range(n_clicks):
+                            await page.mouse.click(cx, cy)
+                            if n_clicks > 1:
+                                await page.wait_for_timeout(200)
+                        print(f"[executor] Shadow DOM click via coords: ({cx:.0f}, {cy:.0f})")
+                        return True
+
+        # Text-based fallback using the element's name
+        if action.element < len(elements):
+            el_info = elements[action.element]
+            name = (el_info.name or "").strip()[:60]
+            if name:
+                for strategy in [
+                    lambda: page.get_by_role("button", name=name, exact=False).first,
+                    lambda: page.get_by_text(name, exact=False).first,
+                ]:
+                    try:
+                        fallback_loc = strategy()
+                        for _ in range(n_clicks):
+                            await fallback_loc.click(timeout=2000, force=True)
+                            if n_clicks > 1:
+                                await page.wait_for_timeout(200)
+                        print(f"[executor] Text fallback click succeeded: \"{name[:30]}\"")
+                        return True
+                    except Exception:
+                        continue
 
     # Selector-based fallback (for legacy or submit_code paths)
     if action.selector:
@@ -198,12 +332,13 @@ async def _do_click(page: Page, action: Action, elements: list[ElementInfo]) -> 
 
 async def _do_fill(page: Page, action: Action, elements: list[ElementInfo]) -> bool:
     """Fill an input by index or selector fallback."""
+    text = action.value or "hello"  # Never fill empty text
     # Index-based
     if action.element is not None:
         loc = _resolve_element(page, action, elements)
         if loc:
             try:
-                await loc.fill(action.value)
+                await loc.fill(text, timeout=3000)
                 return True
             except Exception as e:
                 print(f"[executor] Index fill failed: {e}")
@@ -215,23 +350,56 @@ async def _do_fill(page: Page, action: Action, elements: list[ElementInfo]) -> b
         try:
             loc = page.locator(selector).first
             if await loc.is_visible(timeout=500):
-                await loc.fill(action.value)
+                await loc.fill(text, timeout=3000)
                 return True
         except (PlaywrightTimeout, Exception):
             continue
     return False
 
 
-async def _do_scroll(page: Page, action: Action) -> bool:
-    """Scroll down by a pixel amount. Scrolls incrementally for triggers."""
+async def _do_scroll(
+    page: Page, action: Action, elements: list[ElementInfo] | None = None,
+) -> bool:
+    """Scroll down by a pixel amount using mouse.wheel (triggers scroll events).
+
+    If element is specified, positions the mouse over that element first so
+    the wheel events scroll inside the container rather than the page.
+    """
     total = action.amount or 600
+
+    # Element-targeted scroll: position mouse over the element
+    if action.element is not None and elements:
+        loc = _resolve_element(page, action, elements)
+        if loc:
+            try:
+                import asyncio as _aio
+                box = await _aio.wait_for(loc.bounding_box(), timeout=3.0)
+                if box:
+                    cx = box["x"] + box["width"] / 2
+                    cy = box["y"] + box["height"] / 2
+                    await page.mouse.move(cx, cy)
+                    await page.wait_for_timeout(50)
+                    step = 100
+                    scrolled = 0
+                    while scrolled < total:
+                        chunk = min(step, total - scrolled)
+                        await page.mouse.wheel(0, chunk)
+                        scrolled += chunk
+                        await page.wait_for_timeout(80)
+                    return True
+            except Exception as e:
+                print(f"[executor] Element scroll failed: {e}")
+
+    # Default: scroll the main page
+    await page.mouse.move(640, 360)
+    await page.wait_for_timeout(50)
     step = 100
     scrolled = 0
     while scrolled < total:
         chunk = min(step, total - scrolled)
-        await page.evaluate(f"window.scrollBy(0, {chunk})")
+        await page.mouse.wheel(0, chunk)
         scrolled += chunk
-        await page.wait_for_timeout(50)
+        await page.wait_for_timeout(80)
     return True
 
 
@@ -314,7 +482,8 @@ async def _do_hover(page: Page, action: Action, elements: list[ElementInfo]) -> 
         try:
             await hover_loc.hover(force=True)
             # Sustained hover with micro-movements
-            box = await hover_loc.bounding_box()
+            import asyncio as _aio
+            box = await _aio.wait_for(hover_loc.bounding_box(), timeout=3.0)
             if box:
                 cx, cy = box["x"] + box["width"] / 2, box["y"] + box["height"] / 2
                 for i in range(int(duration_secs * 5)):
@@ -526,48 +695,64 @@ async def _do_scroll_element(page: Page, action: Action) -> bool:
 async def _do_canvas_draw(
     page: Page, action: Action, elements: list[ElementInfo]
 ) -> bool:
-    """Draw strokes on a canvas element using mouse simulation."""
+    """Draw strokes on a canvas element via JS event dispatch.
+
+    Uses dispatchEvent with MouseEvents directly on the canvas element.
+    This works reliably in both headed and headless mode because it
+    bypasses Playwright's mouse hit-testing (which can miss the canvas
+    in headless Chromium when overlays affect z-stacking).
+    """
     try:
-        # Try index-based canvas first
-        canvas = None
-        if action.element is not None:
-            loc = _resolve_element(page, action, elements)
-            if loc and await loc.is_visible(timeout=1000):
-                canvas = loc
-
-        # Fallback: find any canvas
-        if canvas is None:
-            canvas = page.locator("canvas").first
-            if not await canvas.is_visible(timeout=1000):
-                print("[executor] Canvas not found")
-                return False
-
-        box = await canvas.bounding_box()
-        if not box:
-            return False
-
-        cx, cy, cw, ch = box["x"], box["y"], box["width"], box["height"]
-
-        # Draw 5 strokes across the canvas
-        for i in range(5):
-            y = cy + ch * (0.2 + 0.15 * i)
-            x_start = cx + cw * 0.1
-            x_end = cx + cw * 0.9
-
-            await page.mouse.move(x_start, y)
-            await page.mouse.down()
-            steps = 8
-            for s in range(1, steps + 1):
-                x = x_start + (x_end - x_start) * s / steps
-                await page.mouse.move(x, y + (s % 2) * 5)
-                await page.wait_for_timeout(20)
-            await page.mouse.up()
-            await page.wait_for_timeout(200)
-
-        return True
+        result = await page.evaluate(_CANVAS_DRAW_JS)
+        print(f"[executor] Canvas draw: {result}")
+        return "ok" in str(result).lower()
     except Exception as e:
         print(f"[executor] Canvas draw failed: {e}")
         return False
+
+
+_CANVAS_DRAW_JS = """
+(async () => {
+    const canvas = document.querySelector('canvas');
+    if (!canvas) return 'no canvas found';
+    const rect = canvas.getBoundingClientRect();
+    if (rect.width < 10 || rect.height < 10) return 'canvas too small: ' + rect.width + 'x' + rect.height;
+
+    const fire = (type, x, y) => {
+        canvas.dispatchEvent(new MouseEvent(type, {
+            bubbles: true, cancelable: true, clientX: x, clientY: y
+        }));
+    };
+
+    // Draw 4 strokes — each mousedown + series of mousemove + mouseup
+    const strokes = [
+        {y: 0.25, x0: 0.1, x1: 0.9},
+        {y: 0.50, x0: 0.9, x1: 0.1},
+        {y: 0.75, x0: 0.1, x1: 0.9},
+        {y: 0.40, x0: 0.2, x1: 0.8},
+    ];
+    for (const s of strokes) {
+        const sy = rect.top + rect.height * s.y;
+        const sx = rect.left + rect.width * s.x0;
+        const ex = rect.left + rect.width * s.x1;
+
+        fire('mousedown', sx, sy);
+        // Allow React state update (isDrawing = true) to flush
+        await new Promise(r => setTimeout(r, 50));
+
+        for (let i = 1; i <= 8; i++) {
+            const x = sx + (ex - sx) * i / 8;
+            fire('mousemove', x, sy);
+            await new Promise(r => setTimeout(r, 20));
+        }
+
+        fire('mouseup', ex, sy);
+        // Allow React to increment stroke count
+        await new Promise(r => setTimeout(r, 100));
+    }
+    return 'ok: 4 strokes drawn on ' + rect.width + 'x' + rect.height + ' canvas';
+})()
+"""
 
 
 async def _do_select(page: Page, action: Action, elements: list[ElementInfo]) -> bool:
@@ -598,29 +783,46 @@ _KEY_MAP = {
 
 
 async def _do_key_sequence(page: Page, action: Action) -> bool:
-    """Read required key sequence from page (or action value) and press each key."""
+    """Read required key sequence from page text and press each key.
+
+    Handles progressive sequences where the page reveals one key at a time:
+    read → press → re-read → press new keys → repeat.
+    """
     try:
-        # If keys are provided in the action value, use those directly
-        if action.value:
-            keys = _parse_key_tokens(action.value)
-            if keys:
-                print(f"[executor] Key sequence from action: pressing {keys}")
-                for key in keys:
-                    await page.keyboard.press(key)
-                    await page.wait_for_timeout(200)
-                return True
+        pressed = 0
+        all_keys: list[str] = []
 
-        # Otherwise read from page text
-        text = await page.inner_text("body")
-        keys = _extract_key_sequence(text)
-        if not keys:
-            print(f"[executor] Key sequence: could not extract keys from page")
-            return False
+        # Iterative: extract, press new keys, re-read (handles progressive reveals)
+        for _round in range(8):
+            text = await page.inner_text("body")
+            keys = _extract_key_sequence(text)
 
-        print(f"[executor] Key sequence: pressing {keys}")
-        for key in keys:
-            await page.keyboard.press(key)
-            await page.wait_for_timeout(200)
+            if not keys and not all_keys and action.value:
+                # Fallback: LLM-provided keys if page extraction found nothing
+                keys = _parse_key_tokens(action.value)
+
+            if len(keys) <= pressed:
+                # No new keys appeared — done or stuck
+                if _round > 0:
+                    break
+                # First round with no keys — try LLM keys
+                if action.value and not keys:
+                    keys = _parse_key_tokens(action.value)
+                if not keys:
+                    print("[executor] Key sequence: could not extract keys from page")
+                    return False
+
+            # Press only newly revealed keys
+            new_keys = keys[pressed:]
+            print(f"[executor] Key sequence round {_round + 1}: pressing {new_keys}")
+            for key in new_keys:
+                await page.keyboard.press(key)
+                await page.wait_for_timeout(300)
+            pressed = len(keys)
+            all_keys = keys
+            await page.wait_for_timeout(400)  # Wait for page to update
+
+        print(f"[executor] Key sequence: pressed {pressed} keys total")
         return True
     except Exception as e:
         print(f"[executor] Key sequence failed: {e}")
@@ -631,6 +833,7 @@ def _extract_key_sequence(text: str) -> list[str]:
     """Extract key names from page text."""
     keys: list[str] = []
     in_sequence = False
+    blank_lines_since_key = 0
     for line in text.splitlines():
         stripped = line.strip()
         if re.search(r"(?:required\s+)?sequence\s*:", stripped, re.IGNORECASE):
@@ -638,13 +841,23 @@ def _extract_key_sequence(text: str) -> list[str]:
             after = re.split(r"sequence\s*:\s*", stripped, flags=re.IGNORECASE)[-1]
             if after:
                 keys.extend(_parse_key_tokens(after))
+            blank_lines_since_key = 0
             continue
-        if in_sequence and stripped:
+        if in_sequence:
+            if not stripped:
+                blank_lines_since_key += 1
+                if blank_lines_since_key > 2 and keys:
+                    break
+                continue
             parsed = _parse_key_tokens(stripped)
             if parsed:
                 keys.extend(parsed)
-            elif len(keys) >= 2:
-                break
+                blank_lines_since_key = 0
+            else:
+                blank_lines_since_key += 1
+                # Only stop after 3 non-key lines with at least some keys found
+                if blank_lines_since_key > 3 and keys:
+                    break
     return keys
 
 
