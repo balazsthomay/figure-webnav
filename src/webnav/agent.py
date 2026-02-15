@@ -40,18 +40,24 @@ def _parse_instruction_actions(
         # (synchronous rapid clicks get batched and may only register once)
         js = (
             "(async () => {"
-            "  let best = null, bestArea = Infinity;"
-            # Search buttons first — they have actual React handlers.
-            # Then fall back to divs/spans which may be click-through wrappers.
-            "  for (const el of document.querySelectorAll('button, div, span, p, section')) {"
+            "  let best = null, bestArea = Infinity, bestChildren = Infinity;"
+            # Find the challenge container with "click here" text, NOT generic
+            # nav buttons. Prefer leaf elements over containers when area is similar.
+            "  for (const el of document.querySelectorAll('div, span, p, section, button')) {"
             "    const t = (el.textContent || '').trim();"
             "    if (!/click here/i.test(t)) continue;"
+            # Skip generic nav buttons — their text is short (< 20 chars)
+            "    if (t.length < 20 && el.tagName === 'BUTTON') continue;"
             "    const cs = getComputedStyle(el);"
             "    if (cs.display === 'none' || cs.visibility === 'hidden') continue;"
             "    const r = el.getBoundingClientRect();"
             "    if (r.width < 10 || r.height < 10) continue;"
             "    const a = r.width * r.height;"
-            "    if (a < bestArea) { best = el; bestArea = a; }"
+            "    const ch = el.children.length;"
+            # Prefer smaller area; if within 10% of current best, prefer fewer children (leaf)
+            "    if (a < bestArea * 0.9 || (a < bestArea * 1.1 && ch < bestChildren)) {"
+            "      best = el; bestArea = a; bestChildren = ch;"
+            "    }"
             "  }"
             f" if (best) {{ for (let i = 0; i < {n}; i++) {{"
             "    best.click();"
@@ -81,6 +87,18 @@ def _parse_instruction_actions(
     if "drag" in inst:
         actions.append(Action(type="drag"))
 
+    # "navigate through N layers/levels" — click the level/reveal button N times
+    # Skip if iframe-specific handler already handles this instruction.
+    # Uses Playwright trusted clicks (React requires trusted events).
+    m_layers = re.search(r"(?:navigate|click) (?:through |each )?(\d+)\s*(?:nested )?(?:layer|level)", inst)
+    if m_layers and "iframe" not in inst:
+        n_layers = int(m_layers.group(1))
+        for _ in range(n_layers + 1):  # +1 for safety margin
+            actions.append(Action(
+                type="click", element=None,
+                value="layer_button",  # Marker for layer navigation
+            ))
+
     # "hover" — find the hover target element (prefer smallest "hover here" element)
     if "hover" in inst:
         hover_el = None
@@ -93,9 +111,15 @@ def _parse_instruction_actions(
                 continue
             if "hover here" in name_l or "hover over" in name_l:
                 hover_candidates.append(el)
-        # Pick the shortest-named candidate (most specific/inner element)
+        # Pick the best hover target: prefer clickable elements, then smallest bbox.
+        # Clickable elements (cursor:pointer) are the actual React event targets,
+        # not their container divs.
         if hover_candidates:
-            hover_el = min(hover_candidates, key=lambda e: len(e.name))
+            def _hover_sort_key(e: ElementInfo) -> tuple[int, float]:
+                is_clickable = "clickable" in (e.extra or "")
+                area = (e.bbox["width"] * e.bbox["height"]) if e.bbox else float("inf")
+                return (0 if is_clickable else 1, area)
+            hover_el = min(hover_candidates, key=_hover_sort_key)
         # Fallback: any clickable element with "hover" in text
         if hover_el is None:
             for el in elements:
@@ -107,12 +131,12 @@ def _parse_instruction_actions(
                     break
         if hover_el:
             actions.append(Action(
-                type="hover", element=hover_el.index, duration=8.0,
+                type="hover", element=hover_el.index, duration=5.0,
             ))
         elif "complete all" not in inst:
             # JS fallback: find hover target by text and dispatch hover events
             # Uses the executor's full hover fallback (JS coords → Playwright mouse)
-            actions.append(Action(type="hover", duration=8.0))
+            actions.append(Action(type="hover", duration=5.0))
 
     # Rotating code / capture challenge: click Capture N times
     if "capture" in inst:
@@ -252,7 +276,7 @@ def _parse_instruction_actions(
                 .sort((a, b) => a.textContent.localeCompare(b.textContent));
             for (const btn of tabBtns) {
                 btn.click();
-                await new Promise(r => setTimeout(r, 600));
+                await new Promise(r => setTimeout(r, 400));
             }
             await new Promise(r => setTimeout(r, 500));
             const doneBtn = Array.from(document.querySelectorAll('button'))
@@ -273,6 +297,18 @@ def _parse_instruction_actions(
             function findCode(text) {{
                 const matches = (text || '').match(codeRe);
                 return matches ? matches.find(c => !fp.test(c)) : null;
+            }}
+            function surfaceCode(code) {{
+                // Inject code into a visible marker div so find_code() can pick it up
+                let marker = document.getElementById('wnav-discovered-code');
+                if (!marker) {{
+                    marker = document.createElement('div');
+                    marker.id = 'wnav-discovered-code';
+                    marker.style.cssText = 'position:fixed;top:0;left:0;z-index:99999;background:white;color:black;font-size:20px;padding:10px;';
+                    document.body.appendChild(marker);
+                }}
+                marker.textContent = code;
+                return 'iframe-code:' + code;
             }}
             function findBtn(doc) {{
                 return Array.from(doc.querySelectorAll('button'))
@@ -297,9 +333,9 @@ def _parse_instruction_actions(
                 if (!btn) break;
                 btn.click();
                 depth++;
-                await new Promise(r => setTimeout(r, 600));
+                await new Promise(r => setTimeout(r, 400));
                 const code = findCode(document.body.innerText);
-                if (code) return 'iframe-code:' + code;
+                if (code) return surfaceCode(code);
             }}
             // Phase 2: Traverse nested iframes for buttons and code
             let doc = document;
@@ -309,15 +345,15 @@ def _parse_instruction_actions(
                 doc = iframeDoc;
                 // Check for code at this level
                 const code = findCode(doc.body?.innerText);
-                if (code) return 'iframe-code:' + code;
+                if (code) return surfaceCode(code);
                 // Click level buttons inside this iframe
                 const btn = findBtn(doc);
                 if (btn) {{
                     btn.click();
                     depth++;
-                    await new Promise(r => setTimeout(r, 600));
+                    await new Promise(r => setTimeout(r, 400));
                     const code2 = findCode(doc.body?.innerText);
-                    if (code2) return 'iframe-code:' + code2;
+                    if (code2) return surfaceCode(code2);
                 }}
             }}
             // Phase 3: Click extract/reveal buttons at deepest level
@@ -325,13 +361,13 @@ def _parse_instruction_actions(
                 .filter(b => /extract|reveal|show|code/i.test(b.textContent));
             for (const btn of revealBtns) {{
                 btn.click();
-                await new Promise(r => setTimeout(r, 600));
+                await new Promise(r => setTimeout(r, 400));
             }}
             // Final code check across all iframe levels
             let checkDoc = document;
             for (let i = 0; i < maxDepth + 1; i++) {{
                 const code = findCode(checkDoc.body?.innerText || checkDoc.innerText);
-                if (code) return 'iframe-code:' + code;
+                if (code) return surfaceCode(code);
                 const iframe = checkDoc.querySelector('iframe');
                 if (iframe && iframe.contentDocument) checkDoc = iframe.contentDocument;
                 else break;
@@ -550,7 +586,7 @@ _PUZZLE_SOLVE_JS = """
     }
 
     // 5. Delay for React state to process all option selections
-    await new Promise(r => setTimeout(r, 800));
+    await new Promise(r => setTimeout(r, 400));
 
     // 6. Click Solve/Submit buttons — use broad matching (not exact)
     //    to catch "Solve Puzzle", "Submit Answer", etc.
@@ -565,7 +601,7 @@ _PUZZLE_SOLVE_JS = """
     clickSolveBtns();
 
     // 7. Wait and try clicking Solve again (button may only enable after React processes)
-    await new Promise(r => setTimeout(r, 800));
+    await new Promise(r => setTimeout(r, 400));
     clickSolveBtns();
 
     // 8. Focus math input and press Enter to submit form (fallback if no Solve button)
@@ -817,6 +853,7 @@ class Agent:
             attempts_on_step = 0
             step_history: list[str] = []  # Track what was tried per step
             step_start_time = 0.0  # Track total time on current step
+            abandoned_steps: set[int] = set()  # Steps we gave up on
             max_step_total = 22.0  # Max seconds on a single step
 
             while not self.state.is_over_budget():
@@ -828,6 +865,10 @@ class Agent:
                 if current_step == 0:
                     await asyncio.sleep(1.0)
                     continue
+
+                # Skip steps we already abandoned
+                if current_step in abandoned_steps:
+                    break
 
                 if current_step != last_step:
                     last_step = current_step
@@ -852,10 +893,9 @@ class Agent:
                             break
                     if skipped:
                         continue
-                    # All skip offsets failed — abandon this step and try to
-                    # reach the next one via natural solve flow. Increment the
-                    # step counter so we don't retry the same stuck step.
+                    # All skip offsets failed — abandon this step permanently
                     print(f"[agent] All skip offsets failed — abandoning step {current_step}")
+                    abandoned_steps.add(current_step)
                     last_step = current_step + 1
                     attempts_on_step = 0
                     step_history = []
@@ -867,10 +907,10 @@ class Agent:
                         self._solve_step(
                             current_step, attempts_on_step, step_history
                         ),
-                        timeout=20.0,
+                        timeout=11.0,
                     )
                 except asyncio.TimeoutError:
-                    print(f"[agent] Step {current_step} attempt timed out (20s)")
+                    print(f"[agent] Step {current_step} attempt timed out (11s)")
                     self.metrics.end_step(False)
                     success = False
                 if success:
@@ -896,8 +936,9 @@ class Agent:
                                 break
                         if skipped:
                             continue
-                        # All skip offsets failed — abandon and move on
+                        # All skip offsets failed — abandon permanently
                         print(f"[agent] All skip offsets failed — abandoning step {current_step}")
+                        abandoned_steps.add(current_step)
                         last_step = current_step + 1
                         attempts_on_step = 0
                         step_history = []
@@ -946,7 +987,7 @@ class Agent:
             # render time — React components mount asynchronously.
             # If elements are sparse despite a complex instruction, wait and re-perceive.
             _COMPLEX_RE = re.compile(
-                r"(sequence|complete all \d|puzzle|service worker|split parts)",
+                r"(sequence|complete all \d|puzzle|service worker|split parts|drag|shadow dom|keyboard sequence)",
                 re.IGNORECASE,
             )
             if _COMPLEX_RE.search(page_state.instruction) and len(filtered) < 6:
@@ -1023,10 +1064,21 @@ class Agent:
                         # Delay between pre-actions for React state updates
                         if i < len(pre_actions) - 1:
                             await asyncio.sleep(inter_delay)
-                    # Hover-sensitive extraction: check for codes IMMEDIATELY
-                    # after hover (before reset_cleaner restores noise overlays
-                    # which kill CSS :hover state and hide the revealed code).
+                    # Early extraction: check for codes immediately after
+                    # pre-actions complete (before auto-click buttons which may
+                    # re-hide revealed content).
                     has_hover = any(a.type == "hover" for a in pre_actions)
+                    has_wait = any(a.type == "wait" for a in pre_actions)
+                    if not has_hover:
+                        # After wait pre-actions, new overlays may have spawned
+                        # during the delay — re-clean before extraction.
+                        if has_wait:
+                            await asyncio.sleep(0.5)
+                            await quick_clean(self.browser.page)
+                        code = await find_code(self.browser.page, self._used_codes)
+                        if code:
+                            if await self._submit_and_check(code, step):
+                                return True
                     if has_hover:
                         code = await find_code(self.browser.page, self._used_codes)
                         if code:
@@ -1042,7 +1094,7 @@ class Agent:
                         except Exception:
                             body_text = ""
                         if "keep hovering" in body_text.lower() or "still hovering" in body_text.lower():
-                            print("[agent] Page says keep hovering — re-hovering 5s")
+                            print("[agent] Page says keep hovering — re-hovering")
                             hover_action = next(
                                 a for a in pre_actions if a.type == "hover"
                             )
@@ -1069,9 +1121,9 @@ class Agent:
                             for i in range(count):
                                 try:
                                     await tagged.nth(i).click(
-                                        timeout=800, force=True
+                                        timeout=500, force=True
                                     )
-                                    await asyncio.sleep(0.2)
+                                    await asyncio.sleep(0.1)
                                 except Exception:
                                     pass
                         except Exception:
@@ -1175,17 +1227,17 @@ class Agent:
             if pre_acted:
                 pre_desc = ", ".join(a.type for a in pre_actions)
                 history = history + [f"Pre-actions already executed: {pre_desc}. Do NOT repeat these."]
-            if attempt >= 2:
-                print("[agent] Multiple failures — calling recovery LLM with screenshot")
+            if attempt >= 1:
+                print("[agent] Retry — calling recovery LLM with screenshot")
                 screenshot = await self.browser.screenshot()
                 pre_tokens = self.solver.total_tokens
                 actions = await self.solver.solve_stuck(
-                    page_state, screenshot, history
+                    page_state, screenshot, history, temperature=0.3
                 )
                 self.metrics.record_llm_call(2, self.solver.total_tokens - pre_tokens)
             else:
                 pre_tokens = self.solver.total_tokens
-                actions = await self.solver.solve(page_state, history)
+                actions = await self.solver.solve(page_state, history, temperature=0.0)
                 self.metrics.record_llm_call(1, self.solver.total_tokens - pre_tokens)
 
             action_desc = ", ".join(
@@ -1413,14 +1465,14 @@ class Agent:
                 if box:
                     cx = box["x"] + box["width"] / 2
                     cy = box["y"] + box["height"] / 2
-                    for i in range(25):  # 5s sustained hover with micro-movements
+                    for i in range(12):  # ~2.4s sustained hover with micro-movements
                         await asyncio.sleep(0.2)
                         await page.mouse.move(cx + (i % 3) - 1, cy)
                     # Move away to trigger mouseleave (some React handlers
                     # check hover duration on onMouseLeave)
                     await page.mouse.move(0, 0)
                     done += 1
-                    print(f"[agent] Seq: hovered ({cx:.0f}, {cy:.0f}) 3s + mouseleave")
+                    print(f"[agent] Seq: hovered ({cx:.0f}, {cy:.0f}) 2.4s + mouseleave")
                 else:
                     await asyncio.sleep(3.0)
                     done += 1
@@ -1429,26 +1481,30 @@ class Agent:
                 print(f"[agent] Seq: hover failed: {e}")
         await asyncio.sleep(0.3)
 
-        # 3. Fill — JS-click for focus, then keyboard type
+        # 3. Fill — Playwright fill() atomically clears + sets + fires events.
+        #    Fallback to keyboard type if fill() fails.
         if found.get("fill"):
             try:
                 loc = page.locator("[data-seq-target='fill']").first
                 await loc.scroll_into_view_if_needed(timeout=3000)
-                await page.evaluate(
-                    "document.querySelector('[data-seq-target=\"fill\"]')?.click()"
-                )
-                await asyncio.sleep(0.1)
-                await page.evaluate(
-                    "document.querySelector('[data-seq-target=\"fill\"]')?.focus()"
-                )
-                await asyncio.sleep(0.1)
-                await page.keyboard.press("Meta+a")
-                await page.keyboard.type("hello")
+                await loc.fill("hello", timeout=3000)
                 await page.evaluate(_REACT_INPUT_TRIGGER_JS)
                 done += 1
-                print("[agent] Seq: typed 'hello' into input")
-            except Exception as e:
-                print(f"[agent] Seq: fill failed: {e}")
+                print("[agent] Seq: filled 'hello' into input")
+            except Exception:
+                # Fallback: keyboard type
+                try:
+                    await page.evaluate(
+                        "document.querySelector('[data-seq-target=\"fill\"]')?.focus()"
+                    )
+                    await asyncio.sleep(0.1)
+                    await page.keyboard.press("Meta+a")
+                    await page.keyboard.type("hello")
+                    await page.evaluate(_REACT_INPUT_TRIGGER_JS)
+                    done += 1
+                    print("[agent] Seq: typed 'hello' into input (keyboard fallback)")
+                except Exception as e2:
+                    print(f"[agent] Seq: fill failed: {e2}")
         await asyncio.sleep(0.3)
 
         # 4. Scroll — Playwright wheel + JS scrollTop fallback

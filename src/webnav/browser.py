@@ -35,12 +35,13 @@ class BrowserController:
             viewport={"width": 1280, "height": 720},
         )
         # Inject shadow root capture BEFORE any page JS runs.
-        # This intercepts attachShadow() to store references even for closed roots.
+        # Force mode:'open' so Playwright locators auto-pierce shadow roots.
+        # Also store __shadow reference as fallback for page.evaluate().
         await self._context.add_init_script("""
             (() => {
                 const _origAttachShadow = Element.prototype.attachShadow;
                 Element.prototype.attachShadow = function(init) {
-                    const shadow = _origAttachShadow.call(this, init);
+                    const shadow = _origAttachShadow.call(this, { ...init, mode: 'open' });
                     this.__shadow = shadow;
                     return shadow;
                 };

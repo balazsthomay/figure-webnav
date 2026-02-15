@@ -77,9 +77,10 @@ target is usually a colored div/section with "hover" text. Use duration=5 or mor
 7. For drag challenges: use drag(from_element, to_element) — NEVER use js() for drag.
 7b. For canvas challenges: ALWAYS use draw_strokes(element), NEVER use js() for canvas \
 drawing — JS synthetic events don't trigger React canvas handlers.
-8. Use js() only when you need to interact with elements not in ELEMENTS \
-(shadow DOM, hidden elements, iframes, etc.). Do NOT use js() to search for codes \
-before trying the instruction first.
+8. Shadow DOM and iframe elements appear in the ELEMENTS list with normal indices — \
+click/fill them like any other element. Only use js() when elements are NOT in ELEMENTS, \
+or for code discovery (searching attributes, storage, etc.). Do NOT use js() to search \
+for codes before trying the instruction first.
 9. If previous attempts failed, try a DIFFERENT approach — don't repeat what didn't work.
 10. When the instruction says "click here" — find the element whose text contains "here" \
 or "Here" (it may be a div/span with onClick, not a button). Use js() to click it if \
@@ -181,7 +182,10 @@ class Solver:
         )
 
     async def solve(
-        self, state: PageState, history: list[str] | None = None
+        self,
+        state: PageState,
+        history: list[str] | None = None,
+        temperature: float = 0.0,
     ) -> list[Action]:
         """Primary LLM solve using compressed page state with indexed elements."""
         prompt = state.to_prompt()
@@ -192,13 +196,14 @@ class Solver:
         hints = _instruction_hints(state.instruction)
         if hints:
             prompt += "\n\n" + hints
-        return await self._call_llm(FAST_MODEL, SYSTEM_PROMPT, prompt)
+        return await self._call_llm(FAST_MODEL, SYSTEM_PROMPT, prompt, temperature)
 
     async def solve_stuck(
         self,
         state: PageState,
         screenshot: bytes | None = None,
         history: list[str] | None = None,
+        temperature: float = 0.0,
     ) -> list[Action]:
         """Recovery LLM with optional screenshot for stuck puzzles."""
         messages: list[dict[str, Any]] = [
@@ -222,26 +227,26 @@ class Solver:
             })
         messages.append({"role": "user", "content": content})
 
-        return await self._call_llm_raw(SMART_MODEL, messages)
+        return await self._call_llm_raw(SMART_MODEL, messages, temperature)
 
     async def _call_llm(
-        self, model: str, system: str, user_msg: str
+        self, model: str, system: str, user_msg: str, temperature: float = 0.0
     ) -> list[Action]:
         messages = [
             {"role": "system", "content": system},
             {"role": "user", "content": user_msg},
         ]
-        return await self._call_llm_raw(model, messages)
+        return await self._call_llm_raw(model, messages, temperature)
 
     async def _call_llm_raw(
-        self, model: str, messages: list[dict[str, Any]]
+        self, model: str, messages: list[dict[str, Any]], temperature: float = 0.0
     ) -> list[Action]:
         try:
             response = await self._client.chat.completions.create(
                 model=model,
                 messages=messages,
                 max_tokens=1024,
-                temperature=0.0,
+                temperature=temperature,
             )
             self.total_calls += 1
             if response.usage:

@@ -6,8 +6,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from webnav.agent import Agent
+from webnav.agent import Agent, _parse_instruction_actions
 from webnav.actions import Action
+from webnav.perception import ElementInfo
 from tests.conftest import (
     STEP1_ARIA_YAML,
     STEP3_ARIA_YAML_WITH_CODE,
@@ -110,8 +111,8 @@ class TestAgentSolveStep:
 
     @pytest.mark.asyncio
     @patch.dict("os.environ", {"OPENROUTER_API_KEY": "test-key"})
-    async def test_solve_step_tier2_on_multiple_failures(self):
-        """On attempt >= 2, calls Tier 2 LLM with screenshot."""
+    async def test_solve_step_recovery_on_retry(self):
+        """On attempt >= 1, calls recovery LLM with screenshot."""
         agent = Agent(headless=True)
         page = make_mock_page(
             url="https://serene-frangipane-7fd25b.netlify.app/step5?version=2",
@@ -124,7 +125,7 @@ class TestAgentSolveStep:
         page.wait_for_url = AsyncMock()
         agent.browser._page = page
 
-        result = await agent._solve_step(5, attempt=2, history=["attempt 1: failed", "attempt 2: failed"])
+        result = await agent._solve_step(5, attempt=1, history=["attempt 1: failed"])
         assert isinstance(result, bool)
         agent.solver.solve_stuck.assert_called_once()
 
@@ -206,6 +207,108 @@ class TestWaitForContent:
         agent.browser._page = page
         # Should not raise — just times out gracefully
         await agent._wait_for_content(timeout=0.3)
+
+
+class TestHoverTargetSelection:
+    """Test that hover target selection prefers clickable + smallest bbox."""
+
+    def test_prefers_clickable_over_non_clickable(self):
+        """Clickable elements (cursor:pointer) sort before non-clickable."""
+        elements = [
+            ElementInfo(index=0, tag="div", name="Hover here to reveal",
+                        bbox={"width": 200, "height": 100, "x": 0, "y": 0},
+                        extra=""),
+            ElementInfo(index=1, tag="div", name="Hover here to reveal",
+                        bbox={"width": 200, "height": 100, "x": 0, "y": 0},
+                        extra="clickable"),
+        ]
+        actions = _parse_instruction_actions("Hover over the target", elements)
+        hover_actions = [a for a in actions if a.type == "hover"]
+        assert len(hover_actions) == 1
+        # Should pick element 1 (clickable)
+        assert hover_actions[0].element == 1
+
+    def test_prefers_smallest_bbox_among_clickable(self):
+        """Among clickable elements, smallest bbox wins."""
+        elements = [
+            ElementInfo(index=0, tag="div", name="Hover here",
+                        bbox={"width": 400, "height": 200, "x": 0, "y": 0},
+                        extra="clickable"),
+            ElementInfo(index=1, tag="span", name="Hover here",
+                        bbox={"width": 100, "height": 50, "x": 0, "y": 0},
+                        extra="clickable"),
+        ]
+        actions = _parse_instruction_actions("Hover over here", elements)
+        hover_actions = [a for a in actions if a.type == "hover"]
+        assert len(hover_actions) == 1
+        assert hover_actions[0].element == 1
+
+    def test_clickable_small_beats_non_clickable_smaller(self):
+        """Clickable element with larger bbox beats non-clickable with smaller bbox."""
+        elements = [
+            ElementInfo(index=0, tag="span", name="Hover here",
+                        bbox={"width": 50, "height": 25, "x": 0, "y": 0},
+                        extra=""),
+            ElementInfo(index=1, tag="div", name="Hover here",
+                        bbox={"width": 200, "height": 100, "x": 0, "y": 0},
+                        extra="clickable"),
+        ]
+        actions = _parse_instruction_actions("Hover over here", elements)
+        hover_actions = [a for a in actions if a.type == "hover"]
+        assert len(hover_actions) == 1
+        # Clickable wins even if larger
+        assert hover_actions[0].element == 1
+
+    def test_no_bbox_sorts_last(self):
+        """Elements without bbox sort after those with bbox."""
+        elements = [
+            ElementInfo(index=0, tag="div", name="Hover here",
+                        bbox=None, extra="clickable"),
+            ElementInfo(index=1, tag="div", name="Hover here",
+                        bbox={"width": 200, "height": 100, "x": 0, "y": 0},
+                        extra="clickable"),
+        ]
+        actions = _parse_instruction_actions("Hover over here", elements)
+        hover_actions = [a for a in actions if a.type == "hover"]
+        assert len(hover_actions) == 1
+        assert hover_actions[0].element == 1
+
+
+class TestRetryTemperature:
+    """Test that retry attempts use recovery LLM with temperature."""
+
+    @pytest.mark.asyncio
+    @patch.dict("os.environ", {"OPENROUTER_API_KEY": "test-key"})
+    async def test_attempt_0_uses_primary(self):
+        """First attempt uses primary LLM with temperature=0.0."""
+        agent = Agent(headless=True)
+        page = make_mock_page(
+            url="https://serene-frangipane-7fd25b.netlify.app/step1?version=2",
+            inner_text="Some challenge",
+            aria_yaml='- heading "Challenge Step 1"\n- paragraph "Some challenge"',
+        )
+        agent.solver.solve = AsyncMock(return_value=[])
+        agent.browser._page = page
+        await agent._solve_step(1, attempt=0, history=[])
+        _, kwargs = agent.solver.solve.call_args
+        assert kwargs.get("temperature", 0.0) == 0.0
+
+    @pytest.mark.asyncio
+    @patch.dict("os.environ", {"OPENROUTER_API_KEY": "test-key"})
+    async def test_attempt_1_uses_recovery(self):
+        """Second attempt uses recovery LLM with screenshot and temperature=0.3."""
+        agent = Agent(headless=True)
+        page = make_mock_page(
+            url="https://serene-frangipane-7fd25b.netlify.app/step1?version=2",
+            inner_text="Some challenge",
+            aria_yaml='- heading "Challenge Step 1"\n- paragraph "Some challenge"',
+        )
+        agent.solver.solve_stuck = AsyncMock(return_value=[])
+        agent.browser._page = page
+        await agent._solve_step(1, attempt=1, history=["attempt 1: failed"])
+        agent.solver.solve_stuck.assert_called_once()
+        _, kwargs = agent.solver.solve_stuck.call_args
+        assert kwargs.get("temperature") == 0.3
 
 
 class TestAgentInit:

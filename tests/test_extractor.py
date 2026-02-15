@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import pytest
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
-from webnav.extractor import find_code, _extract_candidates, _flatten_tree_text
+from webnav.extractor import (
+    find_code, _extract_candidates, _flatten_tree_text, _ADVANCED_SCAN_JS,
+)
 from tests.conftest import make_mock_page
 
 
@@ -95,3 +97,80 @@ class TestFindCode:
         page = make_mock_page(inner_text="Codes: XY45AB and Z9K3LP")
         code = await find_code(page, used_codes={"XY45AB"})
         assert code == "Z9K3LP"
+
+    @pytest.mark.asyncio
+    async def test_finds_base64_encoded_code(self):
+        """Code not in text or hidden scan, but found via Base64 decode."""
+        page = make_mock_page(inner_text="no codes here")
+        # evaluate calls: green_code=None, hidden_scan=None, shadow=None,
+        # iframe_recursive=None, base64_scan="AB3F9X"
+        page.evaluate = AsyncMock(side_effect=[None, None, None, None, "AB3F9X"])
+        # Playwright frames — only main frame (no iframes to search)
+        page.frames = [MagicMock()]
+        code = await find_code(page)
+        assert code == "AB3F9X"
+
+    @pytest.mark.asyncio
+    async def test_base64_skips_used_codes(self):
+        """Base64-decoded code is skipped if already used."""
+        page = make_mock_page(inner_text="no codes here")
+        # evaluate calls: green_code=None, hidden_scan=None, shadow=None,
+        # iframe_recursive=None, base64_scan="AB3F9X", script_scan=None, advanced=None
+        page.evaluate = AsyncMock(side_effect=[None, None, None, None, "AB3F9X", None, None])
+        page.frames = [MagicMock()]
+        code = await find_code(page, used_codes={"AB3F9X"})
+        assert code is None
+
+    @pytest.mark.asyncio
+    async def test_finds_code_in_script_tag(self):
+        """Code found in inline script tag."""
+        page = make_mock_page(inner_text="no codes here")
+        # evaluate calls: green=None, hidden=None, shadow=None,
+        # iframe_recursive=None, base64=None, script_scan="K9M3PL"
+        page.evaluate = AsyncMock(
+            side_effect=[None, None, None, None, None, "K9M3PL"]
+        )
+        page.frames = [MagicMock()]
+        code = await find_code(page)
+        assert code == "K9M3PL"
+
+    @pytest.mark.asyncio
+    async def test_finds_code_via_advanced_scan(self):
+        """Code found by advanced scan (split/encoding/template etc.)."""
+        page = make_mock_page(inner_text="no codes here")
+        # evaluate calls: green=None, hidden=None, shadow=None,
+        # iframe_recursive=None, base64=None, script=None, advanced="QR7X2M"
+        page.evaluate = AsyncMock(
+            side_effect=[None, None, None, None, None, None, "QR7X2M"]
+        )
+        page.frames = [MagicMock()]
+        code = await find_code(page)
+        assert code == "QR7X2M"
+
+    @pytest.mark.asyncio
+    async def test_advanced_scan_skips_used_codes(self):
+        """Advanced scan result is skipped if already used."""
+        page = make_mock_page(inner_text="no codes here")
+        # All scans return None except advanced which returns a used code
+        page.evaluate = AsyncMock(
+            side_effect=[None, None, None, None, None, None, "QR7X2M"]
+        )
+        page.frames = [MagicMock()]
+        code = await find_code(page, used_codes={"QR7X2M"})
+        assert code is None
+
+
+class TestAdvancedScanJS:
+    """Verify _ADVANCED_SCAN_JS is a valid JS string constant."""
+
+    def test_js_constant_is_nonempty_string(self):
+        assert isinstance(_ADVANCED_SCAN_JS, str)
+        assert len(_ADVANCED_SCAN_JS) > 100
+
+    def test_js_contains_key_sections(self):
+        assert "Split content" in _ADVANCED_SCAN_JS or "split" in _ADVANCED_SCAN_JS.lower()
+        assert "ROT13" in _ADVANCED_SCAN_JS or "rot13" in _ADVANCED_SCAN_JS.lower()
+        assert "template" in _ADVANCED_SCAN_JS.lower()
+        assert "noscript" in _ADVANCED_SCAN_JS.lower()
+        assert "styleSheets" in _ADVANCED_SCAN_JS or "cssRules" in _ADVANCED_SCAN_JS
+        assert "fromCharCode" in _ADVANCED_SCAN_JS

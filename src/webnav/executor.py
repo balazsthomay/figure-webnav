@@ -216,6 +216,42 @@ async def _do_click(page: Page, action: Action, elements: list[ElementInfo]) -> 
     """Click element by index, falling back to selector-based strategies."""
     n_clicks = max(action.amount, 1)
 
+    # Layer button: find and click the level/reveal button via Playwright
+    if action.value == "layer_button":
+        try:
+            for selector in [
+                "button:has-text('Reveal')",
+                "button:has-text('Level')",
+                "button:has-text('Layer')",
+                "button:has-text('Enter')",
+                "button:has-text('Next')",
+            ]:
+                try:
+                    loc = page.locator(selector).first
+                    if await loc.is_visible(timeout=300):
+                        await loc.click(timeout=2000, force=True)
+                        print(f"[executor] Layer click: {selector}")
+                        await asyncio.sleep(0.5)
+                        return True
+                except Exception:
+                    continue
+            # Fallback: click any visible div with "level" or "shadow" in text
+            for text_match in ["Shadow Level", "Level", "Layer"]:
+                try:
+                    loc = page.locator(f"div:has-text('{text_match}')").first
+                    if await loc.is_visible(timeout=300):
+                        await loc.click(timeout=2000, force=True)
+                        print(f"[executor] Layer click: div '{text_match}'")
+                        await asyncio.sleep(0.5)
+                        return True
+                except Exception:
+                    continue
+            print("[executor] Layer click: no target found")
+            return False
+        except Exception as e:
+            print(f"[executor] Layer click failed: {e}")
+            return False
+
     # Index-based: resolve element
     if action.element is not None:
         loc = _resolve_element(page, action, elements)
@@ -554,32 +590,7 @@ async def _do_drag(page: Page, action: Action, elements: list[ElementInfo]) -> b
         if filled >= 6:
             return True
 
-        # Strategy 2: Playwright drag_to
-        for round_num in range(2):
-            pieces_loc = page.locator('[draggable="true"]:not(.opacity-50)')
-            pc = await pieces_loc.count()
-            slot_loc = page.locator('.border-dashed:not([draggable]):not(.bg-green-100):not(.bg-green-200)')
-            sc = await slot_loc.count()
-            if pc == 0 or sc == 0:
-                break
-            print(f"[executor] Drag round {round_num + 1}: {pc} pieces, {sc} unfilled slots")
-            for i in range(min(sc, 6)):
-                try:
-                    src = pieces_loc.nth(i % pc)
-                    dst = slot_loc.nth(i)
-                    if not await src.is_visible(timeout=200):
-                        continue
-                    if not await dst.is_visible(timeout=200):
-                        continue
-                    await src.drag_to(dst, timeout=2000)
-                    await page.wait_for_timeout(150)
-                except Exception:
-                    pass
-            filled = await page.evaluate(_DRAG_JS)
-            if filled >= 6:
-                return True
-
-        # Strategy 3: Mouse simulation
+        # Strategy 2: Mouse simulation (skip Playwright drag_to — too slow)
         layout = await page.evaluate("""
             () => {
                 const pieces = [], slots = [];
@@ -608,16 +619,16 @@ async def _do_drag(page: Page, action: Action, elements: list[ElementInfo]) -> b
             px, py = piece["x"], piece["y"]
             sx, sy = slot["x"], slot["y"]
             await page.mouse.move(px, py)
-            await page.wait_for_timeout(80)
+            await page.wait_for_timeout(50)
             await page.mouse.down()
-            await page.wait_for_timeout(80)
-            for step in range(1, 16):
-                x = px + (sx - px) * step / 15
-                y = py + (sy - py) * step / 15
+            await page.wait_for_timeout(50)
+            for step in range(1, 11):
+                x = px + (sx - px) * step / 10
+                y = py + (sy - py) * step / 10
                 await page.mouse.move(x, y)
-                await page.wait_for_timeout(25)
+                await page.wait_for_timeout(15)
             await page.mouse.up()
-            await page.wait_for_timeout(200)
+            await page.wait_for_timeout(100)
 
         filled = await page.evaluate(_DRAG_JS)
         print(f"[executor] Drag: {filled}/6 after mouse sim")

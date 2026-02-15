@@ -202,6 +202,63 @@ class TestSolverSolve:
 
     @pytest.mark.asyncio
     @patch.dict("os.environ", {"OPENROUTER_API_KEY": "test-key"})
+    async def test_solve_passes_temperature(self):
+        """Verify temperature parameter is threaded through to API call."""
+        solver = Solver()
+        mock_response = MagicMock()
+        mock_response.choices = [MagicMock()]
+        mock_response.choices[0].message.content = '[]'
+        mock_response.usage = MagicMock()
+        mock_response.usage.total_tokens = 50
+
+        solver._client.chat.completions.create = AsyncMock(return_value=mock_response)
+
+        state = PageState(step=1, instruction="Click")
+        await solver.solve(state, temperature=0.3)
+
+        call_kwargs = solver._client.chat.completions.create.call_args
+        assert call_kwargs.kwargs["temperature"] == 0.3
+
+    @pytest.mark.asyncio
+    @patch.dict("os.environ", {"OPENROUTER_API_KEY": "test-key"})
+    async def test_solve_stuck_passes_temperature(self):
+        """Verify temperature parameter is threaded through solve_stuck."""
+        solver = Solver()
+        mock_response = MagicMock()
+        mock_response.choices = [MagicMock()]
+        mock_response.choices[0].message.content = '[]'
+        mock_response.usage = MagicMock()
+        mock_response.usage.total_tokens = 50
+
+        solver._client.chat.completions.create = AsyncMock(return_value=mock_response)
+
+        state = PageState(step=1, instruction="Find code")
+        await solver.solve_stuck(state, temperature=0.5)
+
+        call_kwargs = solver._client.chat.completions.create.call_args
+        assert call_kwargs.kwargs["temperature"] == 0.5
+
+    @pytest.mark.asyncio
+    @patch.dict("os.environ", {"OPENROUTER_API_KEY": "test-key"})
+    async def test_solve_default_temperature_zero(self):
+        """Default temperature should be 0.0."""
+        solver = Solver()
+        mock_response = MagicMock()
+        mock_response.choices = [MagicMock()]
+        mock_response.choices[0].message.content = '[]'
+        mock_response.usage = MagicMock()
+        mock_response.usage.total_tokens = 50
+
+        solver._client.chat.completions.create = AsyncMock(return_value=mock_response)
+
+        state = PageState(step=1, instruction="Click")
+        await solver.solve(state)
+
+        call_kwargs = solver._client.chat.completions.create.call_args
+        assert call_kwargs.kwargs["temperature"] == 0.0
+
+    @pytest.mark.asyncio
+    @patch.dict("os.environ", {"OPENROUTER_API_KEY": "test-key"})
     async def test_solve_sends_page_state_prompt(self):
         """Verify that solve() sends the page state prompt to the LLM."""
         solver = Solver()

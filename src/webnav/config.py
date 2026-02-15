@@ -12,7 +12,7 @@ class ChallengeConfig:
 
     url: str = "https://serene-frangipane-7fd25b.netlify.app"
     total_steps: int = 30
-    max_time: float = 290.0  # 4m50s safety margin
+    max_time: float = 295.0  # 4m55s safety margin
     max_step_time: float = 15.0
     max_retries: int = 2
     code_pattern: re.Pattern[str] = field(

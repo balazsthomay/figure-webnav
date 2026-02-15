@@ -25,8 +25,6 @@ async def main(headless: bool = True, url: str | None = None) -> int:
 
     agent = Agent(headless=headless, config=config)
     metrics = await agent.run()
-
-    # Exit code: 0 if >=28/30 solved, 1 otherwise
     return 0 if metrics.steps_succeeded >= 28 else 1
 
 
@@ -36,5 +34,7 @@ if __name__ == "__main__":
     parser.add_argument("--url", type=str, default=None, help="Challenge site URL")
     args = parser.parse_args()
 
-    exit_code = asyncio.run(main(headless=not args.no_headless, url=args.url))
+    exit_code = asyncio.run(
+        main(headless=not args.no_headless, url=args.url)
+    )
     sys.exit(exit_code)
