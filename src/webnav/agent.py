@@ -363,6 +363,18 @@ def _parse_instruction_actions(
                 btn.click();
                 await new Promise(r => setTimeout(r, 400));
             }}
+            // Check deepest level after reveal clicks (code may appear here)
+            if (revealBtns.length > 0) {{
+                const revCode = findCode(doc.body?.innerText);
+                if (revCode) return surfaceCode(revCode);
+                // Also check attributes at deepest level
+                for (const el of doc.querySelectorAll('*')) {{
+                    for (const attr of el.attributes) {{
+                        if (/^[A-Z0-9]{{6}}$/.test(attr.value) && !fp.test(attr.value))
+                            return surfaceCode(attr.value);
+                    }}
+                }}
+            }}
             // Final code check across all iframe levels
             let checkDoc = document;
             for (let i = 0; i < maxDepth + 1; i++) {{
@@ -443,7 +455,7 @@ _REACT_INPUT_TRIGGER_JS = """
 # Made async so we can add delays between selections and the Solve click.
 _PUZZLE_SOLVE_JS = """
 (async () => {
-    const correctRe = /\\b(correct|right choice|this is correct|correct answer|correct choice|select this|the answer|pick this|choose this|this one|best answer|^true$|^yes$|^right$)\\b/i;
+    const correctRe = /\\b(correct|right choice|this is correct|correct answer|correct choice|select this|the answer|pick this|choose this|choose me|pick me|this one|best answer|^true$|^yes$|^right$)\\b/i;
     const wrongRe = /\\b(wrong|incorrect|not this|not the|false|^no$|wrong answer|don't pick|not correct)\\b/i;
     let radioGroupCount = 0;
     let btnGroupCount = 0;
@@ -518,35 +530,40 @@ _PUZZLE_SOLVE_JS = """
         el.dispatchEvent(new MouseEvent('click', o));
         el.click();
     }
-    // Pass 1: tag + click all correct-looking buttons
+    // Pass 1: tag + click all correct-looking buttons (skip if wrongRe also matches —
+    //         e.g. "Not this one" matches correctRe via "this one" but is wrong)
     const correctClicked = new Set();
     for (const btn of optBtns) {
         const text = (btn.textContent || '').toLowerCase().trim();
-        if (correctRe.test(text)) {
+        if (correctRe.test(text) && !wrongRe.test(text)) {
             btn.setAttribute('data-puzzle-select', 'true');
             fullClick(btn);
             correctClicked.add(btn.parentElement);
             btnGroupCount++;
         }
     }
-    // Pass 2: for parent groups with no correct button clicked,
-    //         tag + click the first non-wrong option (ambiguous "Option A" etc.)
-    const parentGroups = new Map();
-    for (const btn of optBtns) {
-        const parent = btn.parentElement;
-        if (!parent || correctClicked.has(parent)) continue;
-        if (!parentGroups.has(parent)) parentGroups.set(parent, []);
-        parentGroups.get(parent).push(btn);
-    }
-    for (const [, btns] of parentGroups) {
-        if (btns.length < 2) continue;
-        for (const btn of btns) {
-            const text = (btn.textContent || '').toLowerCase().trim();
-            if (!wrongRe.test(text)) {
-                btn.setAttribute('data-puzzle-select', 'true');
-                fullClick(btn);
-                btnGroupCount++;
-                break;
+    // Pass 2: for groups with no correct button clicked, pick the first non-wrong option.
+    //         Group buttons by document order: if we know how many correct buttons we found,
+    //         infer group size = total buttons / estimated groups, then check each group.
+    //         All buttons often share one parent, so parentElement grouping doesn't work.
+    const tagged = new Set(optBtns.filter(b => b.hasAttribute('data-puzzle-select')));
+    if (btnGroupCount > 0 && btnGroupCount < optBtns.length) {
+        const groupSize = Math.round(optBtns.length / Math.max(btnGroupCount, 1));
+        if (groupSize >= 2) {
+            for (let g = 0; g < optBtns.length; g += groupSize) {
+                const group = optBtns.slice(g, g + groupSize);
+                const hasCorrect = group.some(b => tagged.has(b));
+                if (!hasCorrect) {
+                    for (const btn of group) {
+                        const text = (btn.textContent || '').toLowerCase().trim();
+                        if (!wrongRe.test(text)) {
+                            btn.setAttribute('data-puzzle-select', 'true');
+                            fullClick(btn);
+                            btnGroupCount++;
+                            break;
+                        }
+                    }
+                }
             }
         }
     }
@@ -911,6 +928,10 @@ class Agent:
                     )
                 except asyncio.TimeoutError:
                     print(f"[agent] Step {current_step} attempt timed out (11s)")
+                    step_history.append(
+                        f"attempt {attempts_on_step + 1}: TIMED OUT after 11s — "
+                        "try a faster/different approach"
+                    )
                     self.metrics.end_step(False)
                     success = False
                 if success:
