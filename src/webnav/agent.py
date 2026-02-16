@@ -91,7 +91,7 @@ def _parse_instruction_actions(
     # Skip if iframe-specific handler already handles this instruction.
     # Uses Playwright trusted clicks (React requires trusted events).
     m_layers = re.search(r"(?:navigate|click) (?:through |each )?(\d+)\s*(?:nested )?(?:layer|level)", inst)
-    if m_layers and "iframe" not in inst:
+    if m_layers and "iframe" not in inst and "shadow" not in inst:
         n_layers = int(m_layers.group(1))
         for _ in range(n_layers + 1):  # +1 for safety margin
             actions.append(Action(
@@ -286,11 +286,16 @@ def _parse_instruction_actions(
         })()"""
         actions.append(Action(type="js", value=tab_js))
 
-    # "iframe" / "nested levels" — recursively click through iframe levels
-    if "iframe" in inst and ("level" in inst or "nested" in inst or "navigate" in inst):
-        m_levels = re.search(r"(\d+)\s*(?:nested\s*)?levels?", inst)
+    # "iframe" / "nested levels/layers" — recursively click through nested levels
+    # Also matches Shadow DOM challenge (same mechanism: click N nested elements)
+    _has_nested = "level" in inst or "nested" in inst or "layer" in inst or "navigate" in inst
+    if ("iframe" in inst or "shadow" in inst) and _has_nested:
+        m_levels = re.search(r"(\d+)\s*(?:nested\s*)?(?:levels?|layers?)", inst)
         n_levels = int(m_levels.group(1)) if m_levels else 5
         iframe_js = f"""(async () => {{
+            // Clear stale marker from previous steps
+            const old = document.getElementById('wnav-discovered-code');
+            if (old) old.remove();
             const maxDepth = {n_levels};
             const fp = /^(SUBMIT|SCROLL|CLICKS?|REVEAL|BUTTON|HIDDEN|STEPBAR|STEP\\d+|DECODE|STRING|BASE64|PLEASE|SELECT|OPTION)$/;
             const codeRe = /\\b([A-Z0-9]{{6}})\\b/g;
@@ -311,12 +316,36 @@ def _parse_instruction_actions(
                 return 'iframe-code:' + code;
             }}
             function findBtn(doc) {{
-                return Array.from(doc.querySelectorAll('button'))
+                // First try buttons (iframe-style "Enter Level N" buttons)
+                const btn = Array.from(doc.querySelectorAll('button'))
                     .find(b => {{
                         const t = b.textContent.trim();
-                        return /enter|level|next|navigate|go deeper/i.test(t)
-                            && !/submit code/i.test(t) && b.offsetParent !== null;
+                        return /enter|next|navigate|go deeper/i.test(t)
+                            && !/submit code|reveal/i.test(t) && b.offsetParent !== null;
                     }});
+                if (btn) return btn;
+                // Then try clickable divs (shadow DOM-style levels)
+                // Find deepest matching div first (innermost = next uncompleted level)
+                const divs = Array.from(doc.querySelectorAll('div'))
+                    .filter(b => {{
+                        const s = getComputedStyle(b);
+                        return s.cursor === 'pointer'
+                            && /level|layer/i.test(b.textContent)
+                            && b.offsetParent !== null;
+                    }})
+                    .reverse();  // deepest first (querySelectorAll = document order)
+                // Pick the deepest one whose own heading hasn't been checked
+                for (const d of divs) {{
+                    // Check only the element's own direct text (not children's text)
+                    const own = Array.from(d.childNodes)
+                        .filter(n => n.nodeType === 3)
+                        .map(n => n.textContent).join('');
+                    const heading = d.querySelector('h1,h2,h3,h4,h5,h6,span');
+                    const label = heading ? heading.textContent : own;
+                    if (label && /level|layer/i.test(label) && !label.includes('✓'))
+                        return d;
+                }}
+                return null;
             }}
             async function waitIframe(doc) {{
                 for (let t = 0; t < 6; t++) {{

@@ -220,9 +220,6 @@ async def _do_click(page: Page, action: Action, elements: list[ElementInfo]) -> 
     if action.value == "layer_button":
         try:
             for selector in [
-                "button:has-text('Reveal')",
-                "button:has-text('Level')",
-                "button:has-text('Layer')",
                 "button:has-text('Enter')",
                 "button:has-text('Next')",
             ]:
