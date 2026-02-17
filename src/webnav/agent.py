@@ -646,6 +646,7 @@ _PUZZLE_SOLVE_JS = """
             setter.call(inp, String(result));
             inp.dispatchEvent(new Event('input', { bubbles: true }));
             inp.dispatchEvent(new Event('change', { bubbles: true }));
+            inp.setAttribute('data-puzzle-math', 'true');
         }
     }
 
@@ -665,7 +666,10 @@ _PUZZLE_SOLVE_JS = """
         for (const btn of document.querySelectorAll('button')) {
             const t = btn.textContent.trim().toLowerCase();
             if (/^submit code$/i.test(t) || /^click here$/i.test(t)) continue;
-            if (/solve|check|verify/i.test(t) || /^submit$/i.test(t)) fullClick(btn);
+            if (/solve|check|verify/i.test(t) || /^submit$/i.test(t)) {
+                btn.setAttribute('data-puzzle-solve', 'true');
+                fullClick(btn);
+            }
         }
     }
     clickSolveBtns();
@@ -1219,7 +1223,7 @@ class Agent:
                         except Exception:
                             pass
                         # 3c: Re-fill math input with Playwright trusted fill
-                        # (JS setter may not fully register with React)
+                        # JS tags the correct input with data-puzzle-math
                         try:
                             math_result = await self.browser.page.evaluate("""
                                 (() => {
@@ -1232,31 +1236,30 @@ class Agent:
                                 })()
                             """)
                             if math_result:
-                                for sel in [
-                                    "input[type='number']",
-                                    "input[inputmode='numeric']",
-                                ]:
-                                    try:
-                                        loc = self.browser.page.locator(sel).first
-                                        if await loc.is_visible(timeout=500):
-                                            await loc.fill(math_result, timeout=1000)
-                                            break
-                                    except Exception:
-                                        continue
+                                try:
+                                    loc = self.browser.page.locator(
+                                        "[data-puzzle-math]"
+                                    ).first
+                                    if await loc.is_visible(timeout=500):
+                                        await loc.fill(
+                                            math_result, timeout=1000
+                                        )
+                                except Exception:
+                                    pass
                         except Exception:
                             pass
-                        await asyncio.sleep(0.5)
-                        # Click Submit/Solve buttons with trusted events
-                        for btn_text in ["Submit", "Solve", "Check", "Verify"]:
-                            try:
-                                loc = self.browser.page.locator(
-                                    f"button:text-is('{btn_text}')"
-                                ).first
-                                if await loc.is_visible(timeout=500):
-                                    await loc.click(timeout=1000)
-                                    await asyncio.sleep(0.5)
-                            except Exception:
-                                pass
+                        await asyncio.sleep(0.3)
+                        # Click Solve button with trusted events
+                        # JS tags the correct button with data-puzzle-solve
+                        try:
+                            loc = self.browser.page.locator(
+                                "[data-puzzle-solve='true']"
+                            ).first
+                            if await loc.is_visible(timeout=500):
+                                await loc.click(timeout=1000)
+                                await asyncio.sleep(0.3)
+                        except Exception:
+                            pass
                     # Poll for code — use more rounds for delayed reveals
                     has_wait = any(a.type == "wait" for a in pre_actions)
                     poll_rounds = 8 if (has_wait or has_puzzle) else 4
