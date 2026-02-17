@@ -491,6 +491,8 @@ _REACT_INPUT_TRIGGER_JS = """
         const ph = (input.placeholder || '').toLowerCase();
         if (ph.includes('code') || ph.includes('character')) continue;
         try {
+            // Reset React _valueTracker so React detects the value change
+            if (input._valueTracker) input._valueTracker.setValue('');
             setter.call(input, val);
             input.dispatchEvent(new Event('input', { bubbles: true }));
             input.dispatchEvent(new Event('change', { bubbles: true }));
@@ -639,6 +641,8 @@ _PUZZLE_SOLVE_JS = """
         }
         if (inp) {
             const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+            // Reset React _valueTracker so React detects the value change
+            if (inp._valueTracker) inp._valueTracker.setValue('');
             setter.call(inp, String(result));
             inp.dispatchEvent(new Event('input', { bubbles: true }));
             inp.dispatchEvent(new Event('change', { bubbles: true }));
