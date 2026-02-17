@@ -315,6 +315,17 @@ def _parse_instruction_actions(
                 marker.textContent = code;
                 return 'iframe-code:' + code;
             }}
+            function fullClick(el) {{
+                const r = el.getBoundingClientRect();
+                const o = {{bubbles:true, cancelable:true, view:window,
+                           clientX:r.x+r.width/2, clientY:r.y+r.height/2}};
+                el.dispatchEvent(new PointerEvent('pointerdown', o));
+                el.dispatchEvent(new MouseEvent('mousedown', o));
+                el.dispatchEvent(new PointerEvent('pointerup', o));
+                el.dispatchEvent(new MouseEvent('mouseup', o));
+                el.dispatchEvent(new MouseEvent('click', o));
+                el.click();
+            }}
             function findBtn(doc) {{
                 // First try buttons (iframe-style "Enter Level N" buttons)
                 const btn = Array.from(doc.querySelectorAll('button'))
@@ -386,10 +397,19 @@ def _parse_instruction_actions(
                 }}
             }}
             // Phase 3: Click extract/reveal buttons at deepest level
-            const revealBtns = Array.from(doc.querySelectorAll('button'))
-                .filter(b => /extract|reveal|show|code/i.test(b.textContent));
+            // Also check main document (shadow DOM levels are in document, not iframes)
+            const searchDocs = doc === document ? [document] : [doc, document];
+            const revealBtns = [];
+            for (const d of searchDocs) {{
+                for (const b of d.querySelectorAll('button')) {{
+                    if (/extract|reveal|show|code/i.test(b.textContent)
+                        && !/submit code/i.test(b.textContent)
+                        && b.offsetParent !== null)
+                        revealBtns.push(b);
+                }}
+            }}
             for (const btn of revealBtns) {{
-                btn.click();
+                fullClick(btn);
                 await new Promise(r => setTimeout(r, 400));
             }}
             // Check deepest level after reveal clicks (code may appear here)
