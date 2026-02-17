@@ -572,7 +572,7 @@ _PUZZLE_SOLVE_JS = """
     // Full pointer event dispatch for React compatibility
     function fullClick(el) {
         const r = el.getBoundingClientRect();
-        const o = {bubbles:true, cancelable:true,
+        const o = {bubbles:true, cancelable:true, view:window,
                    clientX:r.x+r.width/2, clientY:r.y+r.height/2};
         el.dispatchEvent(new PointerEvent('pointerdown', o));
         el.dispatchEvent(new MouseEvent('mousedown', o));
@@ -656,8 +656,9 @@ _PUZZLE_SOLVE_JS = """
         if (correctRe.test(text)) fullClick(label);
     }
 
-    // 5. Delay for React state to process all option selections
-    await new Promise(r => setTimeout(r, 400));
+    // 5. Yield to microtask queue — React 18 schedules re-renders via
+    //    queueMicrotask(), so this guarantees state is committed before Solve click
+    await Promise.resolve();
 
     // 6. Click Solve/Submit buttons — use broad matching (not exact)
     //    to catch "Solve Puzzle", "Submit Answer", etc.
@@ -674,8 +675,8 @@ _PUZZLE_SOLVE_JS = """
     }
     clickSolveBtns();
 
-    // 7. Wait and try clicking Solve again (button may only enable after React processes)
-    await new Promise(r => setTimeout(r, 400));
+    // 7. Yield again and retry Solve (button may only enable after React processes)
+    await Promise.resolve();
     clickSolveBtns();
 
     // 8. Focus math input and press Enter to submit form (fallback if no Solve button)
