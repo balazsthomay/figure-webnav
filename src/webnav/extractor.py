@@ -21,8 +21,14 @@ async def find_code(page: Page, used_codes: set[str] | None = None) -> str | Non
     # Priority 0: check for "confirmed" codes in green success boxes
     # and "Code revealed:" patterns (puzzle challenge success messages).
     # This runs BEFORE page_cleaner can hide high z-index success elements.
+    # Also re-hides noise elements that React re-renders may have restored
+    # (clean_page sets display:none !important, but React style reconciliation
+    # can override inline styles after any click triggers a re-render).
     green_code = await page.evaluate("""
         () => {
+            // Re-hide noise elements first — React re-renders can undo display:none
+            document.querySelectorAll('[data-wnav-noise]').forEach(el =>
+                el.style.setProperty('display', 'none', 'important'));
             const codeRe = /^[A-Z0-9]{6}$/;
             const fp = /^(SUBMIT|SCROLL|CLICKS?|REVEAL|BUTTON|HIDDEN|STEPBAR|STEP\\d+|HELLOA|CANVAS|MOVING|COMPLE|DECODE|STRING|BASE64|PLEASE|SELECT|OPTION)$/;
             // Strategy 1: Look for code inside green success containers
