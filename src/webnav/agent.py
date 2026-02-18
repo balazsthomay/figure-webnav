@@ -131,12 +131,12 @@ def _parse_instruction_actions(
                     break
         if hover_el:
             actions.append(Action(
-                type="hover", element=hover_el.index, duration=5.0,
+                type="hover", element=hover_el.index, duration=3.0,
             ))
         elif "complete all" not in inst:
             # JS fallback: find hover target by text and dispatch hover events
             # Uses the executor's full hover fallback (JS coords → Playwright mouse)
-            actions.append(Action(type="hover", duration=5.0))
+            actions.append(Action(type="hover", duration=3.0))
 
     # Rotating code / capture challenge: click Capture N times
     if "capture" in inst:
@@ -1539,6 +1539,26 @@ class Agent:
                 loc = page.locator("[data-seq-target='hover']").first
                 await loc.scroll_into_view_if_needed(timeout=3000)
                 await loc.hover(force=True, timeout=3000)
+                # JS fallback: dispatch mouseenter/mouseover directly on the
+                # element.  React uses event delegation that may not be ready
+                # on the first page render — Playwright trusted events fire
+                # but React misses them.  JS dispatchEvent is synchronous and
+                # ensures React's mouseover handler runs.  Zero wall-clock
+                # overhead (page.evaluate is instant vs the 2.4s hover).
+                await page.evaluate("""
+                    const el = document.querySelector('[data-seq-target="hover"]');
+                    if (el) {
+                        const r = el.getBoundingClientRect();
+                        const o = {bubbles:true, cancelable:true, view:window,
+                                   clientX:r.x+r.width/2, clientY:r.y+r.height/2};
+                        el.dispatchEvent(new PointerEvent('pointerover', o));
+                        el.dispatchEvent(new PointerEvent('pointerenter',
+                            {...o, bubbles:false}));
+                        el.dispatchEvent(new MouseEvent('mouseover', o));
+                        el.dispatchEvent(new MouseEvent('mouseenter',
+                            {...o, bubbles:false}));
+                    }
+                """)
                 box = await asyncio.wait_for(loc.bounding_box(), timeout=3.0)
                 if box:
                     cx = box["x"] + box["width"] / 2
