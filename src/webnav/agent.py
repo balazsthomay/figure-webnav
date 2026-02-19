@@ -131,12 +131,12 @@ def _parse_instruction_actions(
                     break
         if hover_el:
             actions.append(Action(
-                type="hover", element=hover_el.index, duration=3.0,
+                type="hover", element=hover_el.index, duration=1.0,
             ))
         elif "complete all" not in inst:
             # JS fallback: find hover target by text and dispatch hover events
             # Uses the executor's full hover fallback (JS coords → Playwright mouse)
-            actions.append(Action(type="hover", duration=3.0))
+            actions.append(Action(type="hover", duration=1.0))
 
     # Rotating code / capture challenge: click Capture N times
     if "capture" in inst:
@@ -183,7 +183,7 @@ def _parse_instruction_actions(
                 .find(b => /play/i.test(b.textContent));
             if (playBtn) playBtn.click();
             for (let i = 0; i < 20; i++) {
-                await new Promise(r => setTimeout(r, 500));
+                await new Promise(r => (window.__origST||setTimeout)(r, 500));
                 const completeBtn = Array.from(document.querySelectorAll('button'))
                     .find(b => /^complete$/i.test(b.textContent.trim()));
                 if (completeBtn && completeBtn.offsetParent !== null) {
@@ -362,7 +362,7 @@ def _parse_instruction_actions(
                 for (let t = 0; t < 6; t++) {{
                     const iframe = doc.querySelector('iframe');
                     if (iframe && iframe.contentDocument) return iframe.contentDocument;
-                    await new Promise(r => setTimeout(r, 300));
+                    await new Promise(r => (window.__origST||setTimeout)(r, 300));
                 }}
                 return null;
             }}
@@ -373,7 +373,7 @@ def _parse_instruction_actions(
                 if (!btn) break;
                 btn.click();
                 depth++;
-                await new Promise(r => setTimeout(r, 400));
+                await new Promise(r => (window.__origST||setTimeout)(r, 400));
                 const code = findCode(document.body.innerText);
                 if (code) return surfaceCode(code);
             }}
@@ -391,7 +391,7 @@ def _parse_instruction_actions(
                 if (btn) {{
                     btn.click();
                     depth++;
-                    await new Promise(r => setTimeout(r, 400));
+                    await new Promise(r => (window.__origST||setTimeout)(r, 400));
                     const code2 = findCode(doc.body?.innerText);
                     if (code2) return surfaceCode(code2);
                 }}
@@ -410,7 +410,7 @@ def _parse_instruction_actions(
             }}
             for (const btn of revealBtns) {{
                 fullClick(btn);
-                await new Promise(r => setTimeout(r, 400));
+                await new Promise(r => (window.__origST||setTimeout)(r, 400));
             }}
             // Check deepest level after reveal clicks (code may appear here)
             if (revealBtns.length > 0) {{
@@ -914,11 +914,11 @@ class Agent:
         async with self.browser:
             # Navigate to landing page and click START
             await self.browser.goto(self.config.url)
-            await asyncio.sleep(1.0)
+            await asyncio.sleep(0.5)
             try:
                 start_btn = self.browser.page.locator("text=START").first
                 await start_btn.click(timeout=5000)
-                await asyncio.sleep(1.0)
+                await asyncio.sleep(0.5)
             except Exception as e:
                 print(f"[agent] Could not click START: {e}")
 
@@ -938,7 +938,7 @@ class Agent:
                     break
 
                 if current_step == 0:
-                    await asyncio.sleep(1.0)
+                    await asyncio.sleep(0.5)
                     continue
 
                 # Skip steps we already abandoned
@@ -1040,7 +1040,7 @@ class Agent:
             # 0. Brief pause for React to render challenge content,
             #    then reset stale cleaner CSS and clean fixed overlays.
             if attempt == 0:
-                await asyncio.sleep(0.3)
+                await asyncio.sleep(0.15)
             await quick_clean(self.browser.page)
 
             # 1. Perceive — a11y snapshot + element indexing
@@ -1049,12 +1049,12 @@ class Agent:
             # Retry perception if page hasn't fully loaded.
             # Most challenges have 5+ elements (input, submit, challenge content).
             if len(page_state.elements) < 5:
-                await asyncio.sleep(1.5)
+                await asyncio.sleep(0.5)
                 await quick_clean(self.browser.page)
                 page_state = await snapshot(self.browser.page)
                 # Second retry with even longer wait
                 if len(page_state.elements) < 5:
-                    await asyncio.sleep(1.5)
+                    await asyncio.sleep(0.5)
                     page_state = await snapshot(self.browser.page)
 
             # Keep full element list for execution (executor resolves by
@@ -1071,7 +1071,7 @@ class Agent:
             )
             if _COMPLEX_RE.search(page_state.instruction) and len(filtered) < 6:
                 print(f"[agent] Complex challenge with sparse elements ({len(filtered)}) — waiting for render")
-                await asyncio.sleep(1.5)
+                await asyncio.sleep(0.5)
                 await quick_clean(self.browser.page)
                 page_state = await snapshot(self.browser.page)
                 all_elements = page_state.elements
@@ -1113,7 +1113,7 @@ class Agent:
                     print(f"[agent] Pre-action from instruction: [{desc}]")
                     # Use longer delays for multi-action sequences
                     is_sequence = len(pre_actions) >= 3
-                    inter_delay = 0.5 if is_sequence else 0.3
+                    inter_delay = 0.25 if is_sequence else 0.15
                     for i, a in enumerate(pre_actions):
                         # Aggressive overlay cleanup before hover to ensure
                         # CSS :hover activates on the target, not an overlay.
@@ -1128,7 +1128,7 @@ class Agent:
                                     el.style.setProperty('pointer-events', 'none', 'important');
                                 });
                             """)
-                            await asyncio.sleep(0.1)
+                            await asyncio.sleep(0.05)
                         await execute_action(
                             self.browser.page, a, all_elements,
                         )
@@ -1152,7 +1152,7 @@ class Agent:
                         # After wait pre-actions, new overlays may have spawned
                         # during the delay — re-clean before extraction.
                         if has_wait:
-                            await asyncio.sleep(0.5)
+                            await asyncio.sleep(0.25)
                             await quick_clean(self.browser.page)
                         code = await find_code(self.browser.page, self._used_codes)
                         if code:
@@ -1249,7 +1249,7 @@ class Agent:
                                     pass
                         except Exception:
                             pass
-                        await asyncio.sleep(0.3)
+                        await asyncio.sleep(0.15)
                         # Click Solve button with trusted events
                         # JS tags the correct button with data-puzzle-solve
                         try:
@@ -1258,14 +1258,14 @@ class Agent:
                             ).first
                             if await loc.is_visible(timeout=500):
                                 await loc.click(timeout=1000)
-                                await asyncio.sleep(0.3)
+                                await asyncio.sleep(0.15)
                         except Exception:
                             pass
                     # Poll for code — use more rounds for delayed reveals
                     has_wait = any(a.type == "wait" for a in pre_actions)
                     poll_rounds = 8 if (has_wait or has_puzzle) else 4
                     for _ in range(poll_rounds):
-                        await asyncio.sleep(0.3)
+                        await asyncio.sleep(0.15)
                         # Skip reset_cleaner for hover challenges — restoring
                         # noise overlays kills CSS :hover and hides the code.
                         if not has_hover:
@@ -1291,7 +1291,7 @@ class Agent:
                 await self.browser.page.evaluate(_AUTO_CLICK_BUTTONS_JS)
                 # Poll for code
                 for _ in range(4):
-                    await asyncio.sleep(0.3)
+                    await asyncio.sleep(0.15)
                     await reset_cleaner(self.browser.page)
                     await self.browser.page.evaluate(_AUTO_CLICK_BUTTONS_JS)
                     code = await find_code(self.browser.page, self._used_codes)
@@ -1374,12 +1374,12 @@ class Agent:
                 if i < len(actions) - 1 and action.type in (
                     "click", "draw_strokes", "hover", "fill", "scroll", "drag", "js",
                 ):
-                    await asyncio.sleep(0.2)
+                    await asyncio.sleep(0.1)
 
             # 6. Brief pause for page reaction
             has_interaction = any(a.type in ("click", "hover", "drag", "scroll", "draw_strokes") for a in actions)
             llm_has_hover = any(a.type == "hover" for a in actions)
-            await asyncio.sleep(0.5 if has_interaction else 0.2)
+            await asyncio.sleep(0.25 if has_interaction else 0.1)
 
             # 6a. Hover-sensitive: extract code BEFORE reset_cleaner
             # (noise overlays returning kills CSS :hover → code vanishes)
@@ -1399,11 +1399,11 @@ class Agent:
             #     inside clean_page-hidden containers (position:fixed z>500).
             if not llm_has_hover:
                 await reset_cleaner(self.browser.page)
-                await asyncio.sleep(0.1)
+                await asyncio.sleep(0.05)
 
             # 6c. Auto-click any reveal/complete buttons that appeared after actions
             await self.browser.page.evaluate(_AUTO_CLICK_BUTTONS_JS)
-            await asyncio.sleep(0.3)
+            await asyncio.sleep(0.15)
 
             # 7. Extract code
             code = await find_code(self.browser.page, self._used_codes)
@@ -1411,19 +1411,19 @@ class Agent:
             # 8. If no code, try revealing hidden codes (CSS manipulation)
             if code is None:
                 await self.browser.page.evaluate(_REVEAL_HIDDEN_JS)
-                await asyncio.sleep(0.2)
+                await asyncio.sleep(0.1)
                 code = await find_code(self.browser.page, self._used_codes)
 
             # 10. Brief poll (some challenges reveal codes with delay)
             #     Each round: reset cleaner → auto-click → extract.
             if code is None and not self.state.is_step_timed_out():
                 for poll_round in range(3):
-                    await asyncio.sleep(0.3)
+                    await asyncio.sleep(0.15)
                     if not llm_has_hover:
                         await reset_cleaner(self.browser.page)
-                        await asyncio.sleep(0.1)
+                        await asyncio.sleep(0.05)
                     await self.browser.page.evaluate(_AUTO_CLICK_BUTTONS_JS)
-                    await asyncio.sleep(0.15)
+                    await asyncio.sleep(0.08)
                     code = await find_code(self.browser.page, self._used_codes)
                     if code:
                         break
@@ -1478,7 +1478,7 @@ class Agent:
         #       aren't fixed (position:absolute, etc). This lets click
         #       events pass through to targets below.
         await clean_page(page)
-        await asyncio.sleep(0.1)
+        await asyncio.sleep(0.05)
         # Phase b: catch remaining overlays not handled by clean_page
         await page.evaluate("""
             document.querySelectorAll('*').forEach(el => {
@@ -1491,7 +1491,7 @@ class Agent:
                 }
             });
         """)
-        await asyncio.sleep(0.1)
+        await asyncio.sleep(0.05)
 
         # 2. Tag targets WITHIN the sequence challenge container
         #    (scoped search prevents tagging noise popup buttons)
@@ -1529,7 +1529,7 @@ class Agent:
                 print("[agent] Seq: clicked target")
             except Exception as e:
                 print(f"[agent] Seq: click failed: {e}")
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(0.25)
 
         # 2. Hover — locator.hover(force=True) + sustained micro-movements.
         #    Noise is display:none so nothing intercepts the mouse — CSS :hover
@@ -1563,7 +1563,7 @@ class Agent:
                 if box:
                     cx = box["x"] + box["width"] / 2
                     cy = box["y"] + box["height"] / 2
-                    for i in range(12):  # ~2.4s sustained hover with micro-movements
+                    for i in range(5):  # ~1.0s sustained hover with micro-movements
                         await asyncio.sleep(0.2)
                         await page.mouse.move(cx + (i % 3) - 1, cy)
                     # Move away to trigger mouseleave (some React handlers
@@ -1572,12 +1572,12 @@ class Agent:
                     done += 1
                     print(f"[agent] Seq: hovered ({cx:.0f}, {cy:.0f}) 2.4s + mouseleave")
                 else:
-                    await asyncio.sleep(3.0)
+                    await asyncio.sleep(1.0)
                     done += 1
-                    print("[agent] Seq: hovered (no bbox, waited 3s)")
+                    print("[agent] Seq: hovered (no bbox, waited 1s)")
             except Exception as e:
                 print(f"[agent] Seq: hover failed: {e}")
-        await asyncio.sleep(0.3)
+        await asyncio.sleep(0.15)
 
         # 3. Fill — Playwright fill() atomically clears + sets + fires events.
         #    Fallback to keyboard type if fill() fails.
@@ -1595,7 +1595,7 @@ class Agent:
                     await page.evaluate(
                         "document.querySelector('[data-seq-target=\"fill\"]')?.focus()"
                     )
-                    await asyncio.sleep(0.1)
+                    await asyncio.sleep(0.05)
                     await page.keyboard.press("Meta+a")
                     await page.keyboard.type("hello")
                     await page.evaluate(_REACT_INPUT_TRIGGER_JS)
@@ -1603,7 +1603,7 @@ class Agent:
                     print("[agent] Seq: typed 'hello' into input (keyboard fallback)")
                 except Exception as e2:
                     print(f"[agent] Seq: fill failed: {e2}")
-        await asyncio.sleep(0.3)
+        await asyncio.sleep(0.15)
 
         # 4. Scroll — Playwright wheel + JS scrollTop fallback
         if found.get("scroll"):
@@ -1615,10 +1615,10 @@ class Agent:
                     cx = box["x"] + box["width"] / 2
                     cy = box["y"] + box["height"] / 2
                     await page.mouse.move(cx, cy)
-                    await asyncio.sleep(0.05)
+                    await asyncio.sleep(0.03)
                     for _ in range(15):
                         await page.mouse.wheel(0, 200)
-                        await asyncio.sleep(0.1)
+                        await asyncio.sleep(0.05)
                     # JS fallback: scroll to bottom + dispatch scroll event
                     await page.evaluate("""
                         const el = document.querySelector('[data-seq-target="scroll"]');
@@ -1668,7 +1668,7 @@ class Agent:
                 print(f"[agent] Step {step} PASSED")
                 return True
             for _ in range(3):
-                await asyncio.sleep(0.2)
+                await asyncio.sleep(0.1)
                 if await self.state.check_advancement(self.browser.page, step):
                     self.state.mark_completed()
                     self.metrics.end_step(True, code=code)
@@ -1694,7 +1694,7 @@ class Agent:
                 window.history.pushState({{}}, '', '/step{next_step}');
                 window.dispatchEvent(new PopStateEvent('popstate'));
             """)
-            await asyncio.sleep(1.0)
+            await asyncio.sleep(0.5)
             actual = await self.state.detect_step_from_url(self.browser.page)
             if actual != next_step:
                 print(f"[agent] Skip failed — URL shows step {actual}")
@@ -1707,7 +1707,7 @@ class Agent:
             if "not found" in body_text.lower() or "broken link" in body_text.lower():
                 print(f"[agent] Skip failed — got 404 page, navigating back")
                 await self.browser.page.evaluate("window.history.back()")
-                await asyncio.sleep(1.0)
+                await asyncio.sleep(0.5)
                 return False
             print(f"[agent] Skipped step {current_step} → step {next_step}")
             return True
@@ -1723,5 +1723,5 @@ class Agent:
                 await self.browser.page.wait_for_selector("h1", timeout=1000)
                 return
             except Exception:
-                await asyncio.sleep(0.3)
-        await asyncio.sleep(1.0)
+                await asyncio.sleep(0.15)
+        await asyncio.sleep(0.5)

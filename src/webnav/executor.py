@@ -181,7 +181,7 @@ async def submit_code(page: Page, code: str) -> bool:
             return False
 
         await textbox.fill(code)
-        await page.wait_for_timeout(100)
+        await page.wait_for_timeout(50)
 
         submit = None
         for selector in [
@@ -204,7 +204,7 @@ async def submit_code(page: Page, code: str) -> bool:
         else:
             await textbox.press("Enter")
 
-        await page.wait_for_timeout(500)
+        await page.wait_for_timeout(250)
         return True
 
     except Exception as e:
@@ -228,7 +228,7 @@ async def _do_click(page: Page, action: Action, elements: list[ElementInfo]) -> 
                     if await loc.is_visible(timeout=300):
                         await loc.click(timeout=2000, force=True)
                         print(f"[executor] Layer click: {selector}")
-                        await asyncio.sleep(0.5)
+                        await asyncio.sleep(0.25)
                         return True
                 except Exception:
                     continue
@@ -239,7 +239,7 @@ async def _do_click(page: Page, action: Action, elements: list[ElementInfo]) -> 
                     if await loc.is_visible(timeout=300):
                         await loc.click(timeout=2000, force=True)
                         print(f"[executor] Layer click: div '{text_match}'")
-                        await asyncio.sleep(0.5)
+                        await asyncio.sleep(0.25)
                         return True
                 except Exception:
                     continue
@@ -262,7 +262,7 @@ async def _do_click(page: Page, action: Action, elements: list[ElementInfo]) -> 
                 for _ in range(n_clicks):
                     await loc.click(timeout=2000, force=True)
                     if n_clicks > 1:
-                        await page.wait_for_timeout(200)
+                        await page.wait_for_timeout(100)
                 # For non-standard elements (div, span, label, etc.),
                 # also do a JS .click() — Playwright mouse events sometimes
                 # don't trigger React handlers on these elements.
@@ -411,28 +411,28 @@ async def _do_scroll(
                     cx = box["x"] + box["width"] / 2
                     cy = box["y"] + box["height"] / 2
                     await page.mouse.move(cx, cy)
-                    await page.wait_for_timeout(50)
+                    await page.wait_for_timeout(25)
                     step = 100
                     scrolled = 0
                     while scrolled < total:
                         chunk = min(step, total - scrolled)
                         await page.mouse.wheel(0, chunk)
                         scrolled += chunk
-                        await page.wait_for_timeout(80)
+                        await page.wait_for_timeout(40)
                     return True
             except Exception as e:
                 print(f"[executor] Element scroll failed: {e}")
 
     # Default: scroll the main page
     await page.mouse.move(640, 360)
-    await page.wait_for_timeout(50)
+    await page.wait_for_timeout(25)
     step = 100
     scrolled = 0
     while scrolled < total:
         chunk = min(step, total - scrolled)
         await page.mouse.wheel(0, chunk)
         scrolled += chunk
-        await page.wait_for_timeout(80)
+        await page.wait_for_timeout(40)
     return True
 
 
@@ -746,17 +746,17 @@ _CANVAS_DRAW_JS = """
 
         fire('mousedown', sx, sy);
         // Allow React state update (isDrawing = true) to flush
-        await new Promise(r => setTimeout(r, 50));
+        await new Promise(r => (window.__origST||setTimeout)(r, 50));
 
         for (let i = 1; i <= 8; i++) {
             const x = sx + (ex - sx) * i / 8;
             fire('mousemove', x, sy);
-            await new Promise(r => setTimeout(r, 20));
+            await new Promise(r => (window.__origST||setTimeout)(r, 20));
         }
 
         fire('mouseup', ex, sy);
         // Allow React to increment stroke count
-        await new Promise(r => setTimeout(r, 100));
+        await new Promise(r => (window.__origST||setTimeout)(r, 100));
     }
     return 'ok: 4 strokes drawn on ' + rect.width + 'x' + rect.height + ' canvas';
 })()
@@ -825,10 +825,10 @@ async def _do_key_sequence(page: Page, action: Action) -> bool:
             print(f"[executor] Key sequence round {_round + 1}: pressing {new_keys}")
             for key in new_keys:
                 await page.keyboard.press(key)
-                await page.wait_for_timeout(300)
+                await page.wait_for_timeout(150)
             pressed = len(keys)
             all_keys = keys
-            await page.wait_for_timeout(400)  # Wait for page to update
+            await page.wait_for_timeout(200)  # Wait for page to update
 
         print(f"[executor] Key sequence: pressed {pressed} keys total")
         return True

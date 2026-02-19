@@ -47,6 +47,32 @@ class BrowserController:
                 };
             })();
         """)
+        # Timer acceleration: speed up page-side timers 10x and make
+        # CSS animations near-instant.  React 18 uses MessageChannel
+        # (not setTimeout) for scheduling, so this is safe.
+        # Pre-action JS that needs real-time delays uses window.__origST.
+        await self._context.add_init_script("""
+            (() => {
+                window.__origST = window.setTimeout;
+                window.__origSI = window.setInterval;
+                const F = 10;
+                window.setTimeout = function(fn, delay, ...args) {
+                    return window.__origST.call(window, fn,
+                        Math.max(1, Math.floor((delay || 0) / F)), ...args);
+                };
+                window.setInterval = function(fn, delay, ...args) {
+                    return window.__origSI.call(window, fn,
+                        Math.max(1, Math.floor((delay || 0) / F)), ...args);
+                };
+                const s = document.createElement('style');
+                s.textContent = '*, *::before, *::after { ' +
+                    'animation-duration: 0.01s !important; ' +
+                    'transition-duration: 0.01s !important; ' +
+                    'animation-delay: 0s !important; ' +
+                    'transition-delay: 0s !important; }';
+                (document.head || document.documentElement).appendChild(s);
+            })();
+        """)
         self._page = await self._context.new_page()
         self._page.on("dialog", self._handle_dialog)
         return self

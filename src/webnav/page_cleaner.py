@@ -107,4 +107,4 @@ _QUICK_CLEAN_JS = _RESET_JS.rstrip().rstrip(";") + ";\n" + CLEANUP_JS
 async def quick_clean(page: Page) -> None:
     """Reset stale cleaner CSS then clean overlays — single JS round-trip."""
     await page.evaluate(_QUICK_CLEAN_JS)
-    await page.wait_for_timeout(100)
+    await page.wait_for_timeout(50)
