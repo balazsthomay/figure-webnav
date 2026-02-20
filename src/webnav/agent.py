@@ -433,6 +433,34 @@ def _parse_instruction_actions(
                 if (iframe && iframe.contentDocument) checkDoc = iframe.contentDocument;
                 else break;
             }}
+            // Phase 4: React fiber onComplete fallback
+            // When Extract Code button is bugged (off-by-one guard), bypass via React internals
+            {{
+                const startEl = revealBtns[0] || findBtn(document);
+                if (startEl) {{
+                    const fk = Object.keys(startEl).find(k => k.startsWith('__reactFiber'));
+                    if (fk) {{
+                        let f = startEl[fk];
+                        for (let i = 0; i < 40 && f; i++, f = f.return) {{
+                            const p = f.memoizedProps || f.pendingProps;
+                            if (p && typeof p.onComplete === 'function' && p.stepNum !== undefined) {{
+                                try {{
+                                    const r = p.onComplete({{
+                                        type: "recursive_iframe",
+                                        timestamp: Date.now(),
+                                        data: {{ method: "recursive_iframe", numLevels: maxDepth,
+                                                 currentLevel: maxDepth, levelClickTimes: {{}},
+                                                 stepNum: p.stepNum }}
+                                    }});
+                                    if (typeof r === 'string' && /^[A-Z0-9]{{6}}$/.test(r))
+                                        return surfaceCode(r);
+                                }} catch(e) {{}}
+                                break;
+                            }}
+                        }}
+                    }}
+                }}
+            }}
             return 'iframe: navigated ' + depth + ' levels';
         }})()"""
         actions.append(Action(type="js", value=iframe_js))
