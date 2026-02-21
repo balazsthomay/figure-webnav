@@ -36,18 +36,22 @@ def _parse_instruction_actions(
     if m:
         n = int(m.group(1))
         # JS finds the smallest (deepest) element containing "click here"
-        # Uses async with delays so React processes each click individually
-        # (synchronous rapid clicks get batched and may only register once)
+        # Uses fullClick() + real-time delays so React processes each click
         js = (
             "(async () => {"
+            "  function fullClick(el) {"
+            "    const o = {bubbles:true, cancelable:true, view:window};"
+            "    el.dispatchEvent(new PointerEvent('pointerdown', o));"
+            "    el.dispatchEvent(new MouseEvent('mousedown', o));"
+            "    el.dispatchEvent(new PointerEvent('pointerup', o));"
+            "    el.dispatchEvent(new MouseEvent('mouseup', o));"
+            "    el.dispatchEvent(new MouseEvent('click', o));"
+            "    el.click();"
+            "  }"
             "  let best = null, bestArea = Infinity, bestChildren = Infinity;"
-            # Find the challenge container with "click here" text, NOT generic
-            # nav buttons. Prefer leaf elements over containers when area is similar.
             "  for (const el of document.querySelectorAll('div, span, p, section, button')) {"
             "    const t = (el.textContent || '').trim();"
             "    if (!/click here/i.test(t)) continue;"
-            # Skip generic nav buttons — their text is short (< 20 chars)
-            "    if (t.length < 20 && el.tagName === 'BUTTON') continue;"
             "    const cs = getComputedStyle(el);"
             "    if (cs.display === 'none' || cs.visibility === 'hidden') continue;"
             "    const r = el.getBoundingClientRect();"
@@ -60,10 +64,12 @@ def _parse_instruction_actions(
             "    }"
             "  }"
             f" if (best) {{ for (let i = 0; i < {n}; i++) {{"
-            "    best.click();"
-            "    await new Promise(r => setTimeout(r, 400));"
+            "    fullClick(best);"
+            # Real-time delays via __origST — timer acceleration would reduce
+            # 400ms to 40ms, too fast for React state updates between clicks
+            "    await new Promise(r => (window.__origST||setTimeout)(r, 400));"
             "  }"
-            "  await new Promise(r => setTimeout(r, 500));"
+            "  await new Promise(r => (window.__origST||setTimeout)(r, 500));"
             f"  return 'clicked {n}x on ' + best.tagName; }}"
             "  return 'no target';"
             "})()"
