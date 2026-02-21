@@ -116,7 +116,10 @@ async def run(
             case "scroll":
                 return await _do_scroll(page, action, elems)
             case "wait":
-                await asyncio.sleep(min(action.amount, 15))  # Cap at 15s
+                # Page timers run 10x faster (add_init_script acceleration),
+                # so scale real wait accordingly: amount/10 + buffer for
+                # React re-render + DOM update overhead.
+                await asyncio.sleep(min(action.amount / 10 + 0.5, 2.0))
                 return True
             case "press":
                 await page.keyboard.press(action.value)
