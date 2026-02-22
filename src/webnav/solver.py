@@ -153,6 +153,12 @@ def _instruction_hints(instruction: str) -> str:
             ".find(b=>/capture|complete/i.test(b.textContent));if(btn){btn.click();await new Promise(r=>setTimeout(r,200));"
             "btn.click();}await new Promise(r=>setTimeout(r,200));}})()\")"
         )
+    if inst.lstrip().startswith("$") or "awaiting" in inst:
+        hints.append(
+            "TERMINAL/ANIMATION: The page has a typing animation that reveals content. "
+            "Use wait(3) to let the animation finish, then look for codes in the page text. "
+            "If no code is visible, try js() to scan the DOM for hidden 6-character codes."
+        )
     if "click here" in inst or "click the" in inst:
         # Extract click count if mentioned
         import re

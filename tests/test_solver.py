@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from webnav.perception import PageState, ElementInfo
-from webnav.solver import Solver, _parse_actions
+from webnav.solver import Solver, _parse_actions, _instruction_hints
 
 
 class TestParseActions:
@@ -134,6 +134,32 @@ class TestParseActions:
         actions = _parse_actions(raw)
         assert actions[0].type == "draw_strokes"
         assert actions[0].element == 4
+
+
+class TestInstructionHints:
+    """Test that _instruction_hints generates appropriate hints."""
+
+    def test_terminal_prompt_gets_hint(self):
+        """Dollar-sign prompt instruction gets terminal hint."""
+        hints = _instruction_hints("$ awaiting connection...")
+        assert "wait" in hints.lower()
+        assert "terminal" in hints.lower() or "animation" in hints.lower()
+
+    def test_awaiting_gets_hint(self):
+        """'awaiting' instruction gets terminal hint."""
+        hints = _instruction_hints("awaiting connection...")
+        assert "wait" in hints.lower()
+
+    def test_hover_gets_hint(self):
+        """Hover instruction gets hover hint (existing behavior)."""
+        hints = _instruction_hints("Hover over the box")
+        assert "hover" in hints.lower()
+
+    def test_normal_instruction_no_terminal_hint(self):
+        """Normal instruction doesn't get terminal hint."""
+        hints = _instruction_hints("Click the button below")
+        assert "terminal" not in hints.lower()
+        assert "awaiting" not in hints.lower()
 
 
 class TestSolverInit:

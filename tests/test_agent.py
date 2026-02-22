@@ -274,6 +274,30 @@ class TestHoverTargetSelection:
         assert hover_actions[0].element == 1
 
 
+class TestTerminalPreAction:
+    """Test that terminal-style instructions get a JS pre-action."""
+
+    def test_dollar_prompt_gets_js_action(self):
+        """Instruction starting with '$' triggers a JS pre-action."""
+        actions = _parse_instruction_actions("$ awaiting connection...", [])
+        js_actions = [a for a in actions if a.type == "js"]
+        assert len(js_actions) == 1
+        assert "connect" in js_actions[0].value.lower()
+        assert "__origST" in js_actions[0].value  # real-time delay
+
+    def test_awaiting_connection_gets_js(self):
+        """'awaiting connection' in instruction triggers JS pre-action."""
+        actions = _parse_instruction_actions("awaiting connection...", [])
+        js_actions = [a for a in actions if a.type == "js"]
+        assert len(js_actions) == 1
+
+    def test_normal_instruction_no_terminal_action(self):
+        """Normal instructions don't get a terminal pre-action."""
+        actions = _parse_instruction_actions("Click the button below to reveal the code", [])
+        js_actions = [a for a in actions if a.type == "js" and "connect" in (a.value or "").lower()]
+        assert len(js_actions) == 0
+
+
 class TestRetryTemperature:
     """Test that retry attempts use recovery LLM with temperature."""
 

@@ -115,6 +115,24 @@ def _parse_instruction_actions(
         )
         actions.append(Action(type="js", value=js))
 
+    # Terminal / connection prompts — click "Connect" button, wait for the
+    # typing animation, then scan DOM for the revealed code.
+    # Bundled as a single JS action so find_code() only runs AFTER the
+    # animation completes (avoids extracting noise codes from the page).
+    if inst.lstrip().startswith("$") or "awaiting connection" in inst:
+        terminal_js = """(async () => {
+            const btn = Array.from(document.querySelectorAll('button'))
+                .find(b => /^connect$/i.test(b.textContent.trim()));
+            if (btn) btn.click();
+            await new Promise(r => (window.__origST||setTimeout)(r, 3000));
+            const text = document.body.innerText || '';
+            const m = text.match(/\\b([A-Z0-9]{6})\\b/g);
+            const fp = /^(SUBMIT|SCROLL|CLICKS?|REVEAL|BUTTON|HIDDEN|STEPBAR|STEP\\d+|DECODE|STRING|BASE64|PLEASE|SELECT|OPTION|CONNEC)$/;
+            const code = m ? m.find(c => !fp.test(c)) : null;
+            return code ? 'terminal-code:' + code : 'no code found';
+        })()"""
+        actions.append(Action(type="js", value=terminal_js))
+
     # "scroll down [at least] Npx" — always scroll the main page, not a modal.
     # Scrollable elements are used for sequence challenges, not page-level scrolls.
     m = re.search(r"scroll down (?:at least )?(\d+)\s*px", inst)
