@@ -39,6 +39,9 @@ def _parse_instruction_actions(
         # Uses fullClick() + real-time delays so React processes each click
         js = (
             "(async () => {"
+            # Clean stale marker from previous steps
+            "  const old = document.getElementById('wnav-discovered-code');"
+            "  if (old) old.remove();"
             "  function fullClick(el) {"
             "    const o = {bubbles:true, cancelable:true, view:window};"
             "    el.dispatchEvent(new PointerEvent('pointerdown', o));"
@@ -70,7 +73,43 @@ def _parse_instruction_actions(
             "    await new Promise(r => (window.__origST||setTimeout)(r, 400));"
             "  }"
             "  await new Promise(r => (window.__origST||setTimeout)(r, 500));"
-            f"  return 'clicked {n}x on ' + best.tagName; }}"
+            # After clicking, scan DOM for revealed codes (same evaluate — zero round-trips).
+            # Surfaces found code via green marker div so find_code picks it up naturally.
+            "  const codeRe = /^[A-Z0-9]{6}$/;"
+            "  const fpRe = /^(SUBMIT|SCROLL|CLICKS?|REVEAL|BUTTON|HIDDEN|STEPBAR|STEP\\d+|HELLOA|CANVAS|MOVING|COMPLE|DECODE|STRING|BASE64|PLEASE|SELECT|OPTION)$/;"
+            "  let found = null;"
+            # Check all element attributes for exact 6-char codes
+            "  for (const el of document.querySelectorAll('*')) {"
+            "    for (const attr of el.attributes) {"
+            "      if (codeRe.test(attr.value) && !fpRe.test(attr.value)) { found = attr.value; break; }"
+            "    }"
+            "    if (found) break;"
+            "  }"
+            # Check hidden leaf text
+            "  if (!found) {"
+            "    for (const el of document.querySelectorAll('*')) {"
+            "      if (el.childElementCount > 0) continue;"
+            "      const t = (el.textContent || '').trim();"
+            "      if (codeRe.test(t) && !fpRe.test(t)) { found = t; break; }"
+            "    }"
+            "  }"
+            # Check actually-hidden elements (display:none, visibility:hidden, etc.)
+            "  if (!found) {"
+            "    for (const el of document.querySelectorAll('*')) {"
+            "      const s = getComputedStyle(el);"
+            "      if (s.display !== 'none' && s.visibility !== 'hidden' && s.opacity !== '0') continue;"
+            "      const m = (el.textContent || '').match(/\\b([A-Z0-9]{6})\\b/);"
+            "      if (m && !fpRe.test(m[1])) { found = m[1]; break; }"
+            "    }"
+            "  }"
+            # Surface found code via visible marker div (same id as iframe handler)
+            "  if (found) {"
+            "    let mk = document.getElementById('wnav-discovered-code');"
+            "    if (!mk) { mk = document.createElement('div'); mk.id = 'wnav-discovered-code'; document.body.appendChild(mk); }"
+            "    mk.textContent = found;"
+            "    mk.style.cssText = 'position:fixed;top:0;left:0;z-index:99999;background:white;color:black;font-size:20px;padding:10px';"
+            "  }"
+            f"  return 'clicked {n}x on ' + best.tagName + (found ? ' code=' + found : ''); }}"
             "  return 'no target';"
             "})()"
         )

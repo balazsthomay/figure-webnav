@@ -16,7 +16,7 @@ CLEANUP_JS = """
   // puzzle containers, etc.
   // Challenge content markers — if a fixed overlay contains these,
   // it's a challenge panel, not a noise popup.
-  const challengeRe = /complete\s*\(\d|complete all|sequence|puzzle|click me|hover over|hover here|scroll inside|solve|draw|capture|play audio|enter level|tab \d|service worker/i;
+  const challengeRe = /complete\s*\(\d|complete all|sequence|puzzle|click me|click here.*times|hover over|hover here|scroll inside|solve|draw|capture|play audio|enter level|tab \d|service worker/i;
   document.querySelectorAll('*').forEach(el => {
     const s = getComputedStyle(el);
     const z = parseInt(s.zIndex);
