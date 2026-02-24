@@ -207,7 +207,7 @@ async def submit_code(page: Page, code: str) -> bool:
         else:
             await textbox.press("Enter")
 
-        await page.wait_for_timeout(250)
+        await page.wait_for_timeout(100)
         return True
 
     except Exception as e:

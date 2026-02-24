@@ -1149,7 +1149,7 @@ class Agent:
             # 0. Brief pause for React to render challenge content,
             #    then reset stale cleaner CSS and clean fixed overlays.
             if attempt == 0:
-                await asyncio.sleep(0.15)
+                await asyncio.sleep(0.05)
             await quick_clean(self.browser.page)
 
             # 1. Perceive — a11y snapshot + element indexing
@@ -1158,12 +1158,12 @@ class Agent:
             # Retry perception if page hasn't fully loaded.
             # Most challenges have 5+ elements (input, submit, challenge content).
             if len(page_state.elements) < 5:
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(0.25)
                 await quick_clean(self.browser.page)
                 page_state = await snapshot(self.browser.page)
                 # Second retry with even longer wait
                 if len(page_state.elements) < 5:
-                    await asyncio.sleep(0.5)
+                    await asyncio.sleep(0.25)
                     page_state = await snapshot(self.browser.page)
 
             # Keep full element list for execution (executor resolves by
@@ -1833,4 +1833,4 @@ class Agent:
                 return
             except Exception:
                 await asyncio.sleep(0.15)
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(0.2)
