@@ -613,9 +613,10 @@ _PUZZLE_SOLVE_JS = """
     const checkedSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'checked')?.set;
 
     // 1. Handle radio groups: click + programmatically set checked via React setter
-    const radios = document.querySelectorAll('input[type="radio"]');
+    // 1a. Native <input type="radio"> — group by name attribute
+    const nativeRadios = document.querySelectorAll('input[type="radio"]');
     const groups = {};
-    for (const r of radios) {
+    for (const r of nativeRadios) {
         const g = r.name || 'default';
         if (!groups[g]) groups[g] = [];
         groups[g].push(r);
@@ -657,10 +658,47 @@ _PUZZLE_SOLVE_JS = """
         radioGroupCount++;
     }
 
+    // 1b. ARIA <button role="radio"> (Radix UI, Headless UI, etc.)
+    //     Group by parent [role="radiogroup"], text from value attr or label[for].
+    const ariaRadios = document.querySelectorAll('button[role="radio"]');
+    const ariaGroups = {};
+    for (const r of ariaRadios) {
+        const rg = r.closest('[role="radiogroup"]');
+        const key = rg ? (rg.id || 'aria-' + Array.from(document.querySelectorAll('[role="radiogroup"]')).indexOf(rg)) : 'aria-default';
+        if (!ariaGroups[key]) ariaGroups[key] = [];
+        ariaGroups[key].push(r);
+    }
+    for (const inputs of Object.values(ariaGroups)) {
+        let selected = false;
+        for (const r of inputs) {
+            const label = document.querySelector('label[for="' + r.id + '"]');
+            const text = (label ? label.textContent : r.getAttribute('value') || '').toLowerCase();
+            if (correctRe.test(text)) {
+                r.click();
+                if (label) label.click();
+                selected = true;
+                break;
+            }
+        }
+        if (!selected && inputs.length > 0) {
+            for (const r of inputs) {
+                const label = document.querySelector('label[for="' + r.id + '"]');
+                const text = (label ? label.textContent : r.getAttribute('value') || '').toLowerCase();
+                if (!wrongRe.test(text)) {
+                    r.click();
+                    if (label) label.click();
+                    break;
+                }
+            }
+        }
+        radioGroupCount++;
+    }
+
     // 2. Button-style options: click ALL buttons matching correctRe.
     //    Don't group by parent (unreliable DOM structure); just click every
     //    correct-looking option and let React handle selection state.
-    const optBtns = Array.from(document.querySelectorAll('button, [role="radio"], [role="option"]'))
+    //    Exclude [role="radio"] — those are handled in section 1 above.
+    const optBtns = Array.from(document.querySelectorAll('button:not([role="radio"]), [role="option"]'))
         .filter(b => {
             const t = (b.textContent || '').trim();
             return t.length > 0 && t.length < 50

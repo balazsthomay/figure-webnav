@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from webnav.agent import Agent, _parse_instruction_actions
+from webnav.agent import Agent, _parse_instruction_actions, _PUZZLE_SOLVE_JS
 from webnav.actions import Action
 from webnav.perception import ElementInfo
 from tests.conftest import (
@@ -352,6 +352,47 @@ class TestPreActionTimerSafety:
                 f"{label} pre-action has plain setTimeout without __origST: "
                 f"found {len(plain)} unprotected calls"
             )
+
+
+class TestPuzzleSolverAriaRadio:
+    """Puzzle solver JS must detect Radix UI / ARIA radio buttons.
+
+    Radix UI renders radio items as <button role="radio"> (not <input type="radio">).
+    The option text is in the value attribute, not textContent (which is empty/SVG).
+    The solver must find these elements and match their text via value/label.
+    """
+
+    def test_selector_includes_button_role_radio(self):
+        """Section 1 radio detection must query button[role='radio'] too."""
+        # The radio selector should find both native inputs AND ARIA buttons
+        assert 'button[role="radio"]' in _PUZZLE_SOLVE_JS, (
+            "Puzzle solver radio section must include button[role='radio'] "
+            "to detect Radix UI RadioGroupItem elements"
+        )
+
+    def test_text_extraction_uses_value_attr(self):
+        """For ARIA radio buttons with empty textContent, use value attribute."""
+        # Radix buttons have text in value attr, not textContent
+        assert 'getAttribute' in _PUZZLE_SOLVE_JS and 'value' in _PUZZLE_SOLVE_JS, (
+            "Puzzle solver must use getAttribute('value') for ARIA radio text"
+        )
+
+    def test_section2_excludes_role_radio(self):
+        """Section 2 (button options) should skip role='radio' (handled in section 1)."""
+        import re
+        # The button options selector should NOT include [role="radio"] as a
+        # standalone comma-separated selector item. It may appear inside :not()
+        # which is fine (that means it's being excluded).
+        match = re.search(r"querySelectorAll\(['\"](.+?)['\"]\)", _PUZZLE_SOLVE_JS)
+        assert match, "Could not find optBtns querySelectorAll"
+        selector = match.group(1)
+        # Split by comma to get individual selector items
+        items = [s.strip() for s in selector.split(',')]
+        standalone_radio = [s for s in items if s == '[role="radio"]']
+        assert len(standalone_radio) == 0, (
+            "Section 2 optBtns should not include [role='radio'] as a standalone "
+            "selector — those are handled in section 1 ARIA radio detection"
+        )
 
 
 class TestRetryTemperature:
