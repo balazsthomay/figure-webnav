@@ -751,6 +751,22 @@ _PUZZLE_SOLVE_JS = """
     //    queueMicrotask(), so this guarantees state is committed before Solve click
     await Promise.resolve();
 
+    // 5b. Enter key on math input FIRST — different event path (keyboard → form
+    //     submit) that bypasses mouse event delegation entirely. If the component
+    //     processes Enter as form submit, the code appears without needing Solve click.
+    function enterSubmit(el) {
+        if (!el) return;
+        el.focus();
+        const opts = {key:'Enter', code:'Enter', keyCode:13, which:13, bubbles:true, cancelable:true, view:window};
+        el.dispatchEvent(new KeyboardEvent('keydown', opts));
+        el.dispatchEvent(new KeyboardEvent('keypress', opts));
+        el.dispatchEvent(new KeyboardEvent('keyup', opts));
+    }
+    enterSubmit(inp);
+
+    // 5c. Yield — let React process any Enter-triggered submit
+    await Promise.resolve();
+
     // 6. Click Solve/Submit buttons — use broad matching (not exact)
     //    to catch "Solve Puzzle", "Submit Answer", etc.
     //    Exclude "Submit Code" (the code submission button).
@@ -770,15 +786,11 @@ _PUZZLE_SOLVE_JS = """
     await Promise.resolve();
     clickSolveBtns();
 
-    // 8. Focus math input and press Enter to submit form (fallback if no Solve button)
-    if (inp) {
-        inp.focus();
-        inp.dispatchEvent(new KeyboardEvent('keydown', {key:'Enter', code:'Enter', bubbles:true}));
-        inp.dispatchEvent(new KeyboardEvent('keypress', {key:'Enter', code:'Enter', bubbles:true}));
-        inp.dispatchEvent(new KeyboardEvent('keyup', {key:'Enter', code:'Enter', bubbles:true}));
-    }
+    // 7b. Enter key again after Solve clicks — catches cases where Solve button
+    //     enables the input or the component only listens for Enter after selection
+    enterSubmit(inp);
 
-    // 9. Also try submitting any parent form (requestSubmit only — submit() does
+    // 8. Also try submitting any parent form (requestSubmit only — submit() does
     //    a native navigation that can 404 on SPA sites)
     const form = (inp || document.querySelector('input'))?.closest('form');
     if (form && form.requestSubmit) { form.requestSubmit(); }
