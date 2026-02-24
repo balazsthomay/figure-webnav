@@ -325,6 +325,35 @@ class TestTerminalPreAction:
         assert len(js_actions) == 0
 
 
+class TestPreActionTimerSafety:
+    """Pre-action JS must use window.__origST to avoid timer acceleration."""
+
+    INSTRUCTIONS_WITH_SETTIMEOUT = [
+        ("Mutation Challenge: Trigger 5 DOM mutations to reveal the code.", "mutation"),
+        ("Rotating Code Challenge: The code changes every 3 seconds. Click \"Capture\" at least 3 times to complete the challenge.", "capture"),
+        ("Video Challenge: Seek through the video frames. Find and navigate to frame 42, then complete the challenge.", "video"),
+        ("Multi-Tab Challenge: Visit all 4 tabs by clicking each button. Each tab contains a part of the puzzle.", "multi-tab"),
+    ]
+
+    @pytest.mark.parametrize("instruction,label", INSTRUCTIONS_WITH_SETTIMEOUT)
+    def test_pre_action_js_uses_origST(self, instruction, label):
+        """All pre-action JS that uses setTimeout must use window.__origST."""
+        actions = _parse_instruction_actions(instruction, [])
+        js_actions = [a for a in actions if a.type == "js"]
+        assert len(js_actions) >= 1, f"No JS pre-action for {label}"
+        for js_action in js_actions:
+            js = js_action.value
+            if "setTimeout" not in js:
+                continue
+            # Every setTimeout must be wrapped with __origST
+            import re
+            plain = re.findall(r'(?<!__origST\|\|)setTimeout', js)
+            assert len(plain) == 0, (
+                f"{label} pre-action has plain setTimeout without __origST: "
+                f"found {len(plain)} unprotected calls"
+            )
+
+
 class TestRetryTemperature:
     """Test that retry attempts use recovery LLM with temperature."""
 

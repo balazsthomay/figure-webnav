@@ -217,7 +217,7 @@ def _parse_instruction_actions(
             "    const btn = Array.from(document.querySelectorAll('button'))"
             "      .find(b => /capture/i.test(b.textContent));"
             "    if (btn) btn.click();"
-            "    await new Promise(r => setTimeout(r, 1000));"
+            "    await new Promise(r => (window.__origST||setTimeout)(r, 1000));"
             "  }"
             f"  return 'captured {n_cap + 1} times';"
             "})()"
@@ -234,9 +234,9 @@ def _parse_instruction_actions(
             "    const btn = Array.from(document.querySelectorAll('button'))"
             "      .find(b => /trigger/i.test(b.textContent));"
             "    if (btn) btn.click();"
-            "    await new Promise(r => setTimeout(r, 300));"
+            "    await new Promise(r => (window.__origST||setTimeout)(r, 300));"
             "  }"
-            "  await new Promise(r => setTimeout(r, 500));"
+            "  await new Promise(r => (window.__origST||setTimeout)(r, 500));"
             "  const completeBtn = Array.from(document.querySelectorAll('button'))"
             "    .find(b => /complete/i.test(b.textContent));"
             "  if (completeBtn) completeBtn.click();"
@@ -279,9 +279,9 @@ def _parse_instruction_actions(
                 "      .find(b=>b.textContent.trim().toLowerCase().includes(name.toLowerCase()));"
                 "    if(btn && btn.offsetParent!==null){"
                 "      btn.click();"
-                "      await new Promise(r=>setTimeout(r,300));"
+                "      await new Promise(r=>(window.__origST||setTimeout)(r,300));"
                 "    }"
-                "    await new Promise(r=>setTimeout(r,200));"
+                "    await new Promise(r=>(window.__origST||setTimeout)(r,200));"
                 "  }"
                 "  return 'clicked '+name+' in loop';"
                 "})()"
@@ -305,17 +305,17 @@ def _parse_instruction_actions(
         video_js = """(async () => {
             const frameBtn = Array.from(document.querySelectorAll('button'))
                 .find(b => /frame\\s*\\d+/i.test(b.textContent));
-            if (frameBtn) { frameBtn.click(); await new Promise(r => setTimeout(r, 200)); }
+            if (frameBtn) { frameBtn.click(); await new Promise(r => (window.__origST||setTimeout)(r, 200)); }
             for (let round = 0; round < 5; round++) {
                 const seekBtns = Array.from(document.querySelectorAll('button'))
                     .filter(b => /^[+-]\\d+$/.test(b.textContent.trim()));
                 for (const btn of seekBtns) {
                     btn.click();
-                    await new Promise(r => setTimeout(r, 150));
+                    await new Promise(r => (window.__origST||setTimeout)(r, 150));
                 }
                 const moreBtn = Array.from(document.querySelectorAll('button'))
                     .find(b => /seek.*more/i.test(b.textContent));
-                if (moreBtn) { moreBtn.click(); await new Promise(r => setTimeout(r, 200)); }
+                if (moreBtn) { moreBtn.click(); await new Promise(r => (window.__origST||setTimeout)(r, 200)); }
                 const completeBtn = Array.from(document.querySelectorAll('button'))
                     .find(b => /^(complete|reveal|done|finish)$/i.test(b.textContent.trim()));
                 if (completeBtn) { completeBtn.click(); return 'video: completed after ' + (round+1) + ' rounds'; }
@@ -345,9 +345,9 @@ def _parse_instruction_actions(
                 .sort((a, b) => a.textContent.localeCompare(b.textContent));
             for (const btn of tabBtns) {
                 btn.click();
-                await new Promise(r => setTimeout(r, 400));
+                await new Promise(r => (window.__origST||setTimeout)(r, 400));
             }
-            await new Promise(r => setTimeout(r, 500));
+            await new Promise(r => (window.__origST||setTimeout)(r, 500));
             const doneBtn = Array.from(document.querySelectorAll('button'))
                 .find(b => /remember|visited|all.*tab|complete|reveal/i.test(b.textContent));
             if (doneBtn) doneBtn.click();
