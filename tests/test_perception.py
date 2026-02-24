@@ -371,44 +371,42 @@ class TestExtractInstructionFromText:
 
 
 @pytest.mark.asyncio
-async def test_snapshot_with_fallback_instruction():
-    """Test that instruction is extracted from raw text when YAML has none."""
+async def test_snapshot_extracts_instruction_from_text():
+    """Test that instruction is extracted from raw inner_text (aria_snapshot is skipped)."""
     page = make_mock_page(
         url="https://serene-frangipane-7fd25b.netlify.app/step1?version=2",
-        aria_yaml="- heading \"Challenge Step 1\"",
         inner_text="Click the button below to reveal the code\nReveal Code",
     )
     state = await snapshot(page)
     assert "click" in state.instruction.lower()
+    # aria_snapshot should NOT have been called
+    page.locator.return_value.aria_snapshot.assert_not_called()
 
 
 @pytest.mark.asyncio
-async def test_snapshot_handles_aria_exception():
-    """Test snapshot gracefully handles aria_snapshot failure."""
+async def test_snapshot_skips_aria_snapshot():
+    """Test that snapshot never calls aria_snapshot (skipped for speed)."""
     page = make_mock_page(
         url="https://serene-frangipane-7fd25b.netlify.app/step1?version=2",
         inner_text="Click the button to reveal code",
     )
-    # Make aria_snapshot raise
-    mock_loc = page.locator.return_value
-    mock_loc.aria_snapshot = AsyncMock(side_effect=Exception("timeout"))
     state = await snapshot(page)
-    # Should still work via raw text
     assert state.step == 1
+    assert state.aria_yaml == ""
+    page.locator.return_value.aria_snapshot.assert_not_called()
 
 
 @pytest.mark.asyncio
 async def test_snapshot_integration():
     page = make_mock_page(
         url="https://serene-frangipane-7fd25b.netlify.app/step3?version=2",
-        aria_yaml=STEP3_ARIA_YAML_WITH_CODE,
-        inner_text="Your code is: AB3F9X\nSubmit Code",
+        inner_text="Wait for the timer to finish\nYour code is: AB3F9X\nSubmit Code",
     )
     state = await snapshot(page)
     assert state.step == 3
     assert "wait" in state.instruction.lower()
     assert "AB3F9X" in state.visible_codes
-    # Elements list is populated (may be empty if evaluate returns None)
+    assert state.aria_yaml == ""
     assert isinstance(state.elements, list)
 
 
