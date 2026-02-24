@@ -10,6 +10,7 @@ from webnav.perception import (
     CODE_PATTERN,
     ElementInfo,
     PageState,
+    _INDEX_ELEMENTS_JS,
     _extract_codes,
     _extract_instruction,
     _extract_interactive,
@@ -409,3 +410,20 @@ async def test_snapshot_integration():
     assert "AB3F9X" in state.visible_codes
     # Elements list is populated (may be empty if evaluate returns None)
     assert isinstance(state.elements, list)
+
+
+class TestIndexElementsJSActionText:
+    """Verify the JS action text regex covers key interaction patterns."""
+
+    def test_click_here_in_action_text_regex(self):
+        """'click here' should be recognized as an action instruction."""
+        # In the Python string, \s stays literal (not a Python escape).
+        # Check the JS regex includes "here" in the click alternatives.
+        assert "click\\s*(me|here|this)" in _INDEX_ELEMENTS_JS or \
+               "click\\s*(here|me|this)" in _INDEX_ELEMENTS_JS
+
+    def test_existing_action_patterns_preserved(self):
+        """Existing patterns (hover here, click me, etc.) still present."""
+        assert "hover\\s*(here|over|this)" in _INDEX_ELEMENTS_JS
+        assert "scroll\\s*inside" in _INDEX_ELEMENTS_JS
+        assert "type\\s*(here|in\\s*this)" in _INDEX_ELEMENTS_JS

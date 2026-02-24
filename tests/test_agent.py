@@ -274,6 +274,33 @@ class TestHoverTargetSelection:
         assert hover_actions[0].element == 1
 
 
+class TestClickNTimesPreAction:
+    """Test that click-here-N-times instructions get a JS pre-action."""
+
+    def test_click_here_n_times_gets_js(self):
+        """'click here 3 times' triggers a JS pre-action."""
+        actions = _parse_instruction_actions("Click here 3 more times to reveal the code", [])
+        js_actions = [a for a in actions if a.type == "js"]
+        assert len(js_actions) >= 1
+        assert "fullClick" in js_actions[0].value
+
+    def test_click_n_times_uses_specific_regex(self):
+        """Pre-action JS matches 'click here N times', not just 'click here'."""
+        actions = _parse_instruction_actions("Click here 3 more times to reveal the code", [])
+        js_actions = [a for a in actions if a.type == "js"]
+        js = js_actions[0].value
+        # Must use specific regex that won't match noise "Click Here" buttons
+        assert "click here.*\\d+.*time" in js
+        # Must unhide noise containers before searching
+        assert "data-wnav-noise" in js
+
+    def test_normal_instruction_no_click_n_times(self):
+        """Normal instructions don't get a click-N-times pre-action."""
+        actions = _parse_instruction_actions("Click the button below to reveal the code", [])
+        js_actions = [a for a in actions if a.type == "js" and "fullClick" in (a.value or "")]
+        assert len(js_actions) == 0
+
+
 class TestTerminalPreAction:
     """Test that terminal-style instructions get a JS pre-action."""
 

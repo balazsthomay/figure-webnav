@@ -51,10 +51,14 @@ def _parse_instruction_actions(
             "    el.dispatchEvent(new MouseEvent('click', o));"
             "    el.click();"
             "  }"
+            # Unhide noise containers (clean_page may have hidden them before React rendered)
+            "  const __noise = document.querySelectorAll('[data-wnav-noise]');"
+            "  __noise.forEach(el => el.style.removeProperty('display'));"
+            # Use specific regex to avoid matching noise "Click Here" buttons
             "  let best = null, bestArea = Infinity, bestChildren = Infinity;"
             "  for (const el of document.querySelectorAll('div, span, p, section, button')) {"
             "    const t = (el.textContent || '').trim();"
-            "    if (!/click here/i.test(t)) continue;"
+            "    if (!/click here.*\\d+.*time/i.test(t)) continue;"
             "    const cs = getComputedStyle(el);"
             "    if (cs.display === 'none' || cs.visibility === 'hidden') continue;"
             "    const r = el.getBoundingClientRect();"
@@ -66,6 +70,8 @@ def _parse_instruction_actions(
             "      best = el; bestArea = a; bestChildren = ch;"
             "    }"
             "  }"
+            # Re-hide noise containers
+            "  __noise.forEach(el => el.style.setProperty('display', 'none', 'important'));"
             f" if (best) {{ for (let i = 0; i < {n}; i++) {{"
             "    fullClick(best);"
             # Real-time delays via __origST — timer acceleration would reduce

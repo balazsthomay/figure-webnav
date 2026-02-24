@@ -144,7 +144,7 @@ _INDEX_ELEMENTS_JS = """
 
     // Find elements with challenge action text (hover here, scroll inside, click me, type here)
     // These may lack React handlers or cursor:pointer but are still interactive.
-    const actionTextRe = /\b(hover\s*(here|over|this)|scroll\s*inside|click\s*me|type\s*(here|in\s*this))\b/i;
+    const actionTextRe = /\b(hover\s*(here|over|this)|scroll\s*inside|click\s*(me|here|this)|type\s*(here|in\s*this))\b/i;
     for (const el of document.querySelectorAll('div, span, section, p')) {
         if (selectorEls.has(el)) continue;
         const text = (el.textContent || '').trim();
