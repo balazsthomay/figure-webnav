@@ -609,6 +609,10 @@ _PUZZLE_SOLVE_JS = """
     let btnGroupCount = 0;
     let inp = null;  // math answer input (declared here to avoid block-scope issues)
 
+    // Label prefix: "Option A", "Answer 2", etc. are distractor labels, not direct
+    // correctness statements. Deprioritize these when multiple correctRe matches exist.
+    const labelPrefixRe = /^(option|answer|choice|item|selection|alternative)\\s+[a-z0-9]/i;
+
     // React-compatible checked setter
     const checkedSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'checked')?.set;
 
@@ -623,13 +627,13 @@ _PUZZLE_SOLVE_JS = """
     }
     for (const inputs of Object.values(groups)) {
         let selected = false;
+        // Priority pass: prefer correctRe matches WITHOUT a label prefix (e.g. "This is correct" over "Option A - Correct Choice")
         for (const r of inputs) {
             const label = r.closest('label') || document.querySelector('label[for="' + r.id + '"]');
             const text = (label ? label.textContent : r.value || '').toLowerCase();
-            if (correctRe.test(text)) {
+            if (correctRe.test(text) && !wrongRe.test(text) && !labelPrefixRe.test(text.trim())) {
                 r.click();
                 if (label) label.click();
-                // Also set checked via React setter to ensure state update
                 if (checkedSetter) {
                     checkedSetter.call(r, true);
                     r.dispatchEvent(new Event('change', { bubbles: true }));
@@ -639,6 +643,25 @@ _PUZZLE_SOLVE_JS = """
                 break;
             }
         }
+        // Fallback: any correctRe match (including label-prefixed) that isn't wrong
+        if (!selected) {
+            for (const r of inputs) {
+                const label = r.closest('label') || document.querySelector('label[for="' + r.id + '"]');
+                const text = (label ? label.textContent : r.value || '').toLowerCase();
+                if (correctRe.test(text) && !wrongRe.test(text)) {
+                    r.click();
+                    if (label) label.click();
+                    if (checkedSetter) {
+                        checkedSetter.call(r, true);
+                        r.dispatchEvent(new Event('change', { bubbles: true }));
+                        r.dispatchEvent(new Event('input', { bubbles: true }));
+                    }
+                    selected = true;
+                    break;
+                }
+            }
+        }
+        // Last resort: pick first non-wrong option
         if (!selected && inputs.length > 0) {
             for (const r of inputs) {
                 const label = r.closest('label') || document.querySelector('label[for="' + r.id + '"]');
@@ -670,16 +693,31 @@ _PUZZLE_SOLVE_JS = """
     }
     for (const inputs of Object.values(ariaGroups)) {
         let selected = false;
+        // Priority pass: prefer correctRe matches WITHOUT a label prefix
         for (const r of inputs) {
             const label = document.querySelector('label[for="' + r.id + '"]');
             const text = (label ? label.textContent : r.getAttribute('value') || '').toLowerCase();
-            if (correctRe.test(text)) {
+            if (correctRe.test(text) && !wrongRe.test(text) && !labelPrefixRe.test(text.trim())) {
                 r.click();
                 if (label) label.click();
                 selected = true;
                 break;
             }
         }
+        // Fallback: any correctRe match (including label-prefixed) that isn't wrong
+        if (!selected) {
+            for (const r of inputs) {
+                const label = document.querySelector('label[for="' + r.id + '"]');
+                const text = (label ? label.textContent : r.getAttribute('value') || '').toLowerCase();
+                if (correctRe.test(text) && !wrongRe.test(text)) {
+                    r.click();
+                    if (label) label.click();
+                    selected = true;
+                    break;
+                }
+            }
+        }
+        // Last resort: pick first non-wrong option
         if (!selected && inputs.length > 0) {
             for (const r of inputs) {
                 const label = document.querySelector('label[for="' + r.id + '"]');

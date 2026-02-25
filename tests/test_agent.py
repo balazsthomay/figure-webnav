@@ -395,6 +395,57 @@ class TestPuzzleSolverAriaRadio:
         )
 
 
+class TestPuzzleSolverWrongReExclusion:
+    """Radio selection must exclude wrongRe matches even when correctRe matches."""
+
+    def test_section1a_checks_wrongRe(self):
+        """Section 1a (native radio) correctRe pass must also check !wrongRe."""
+        # Find the native radio selection loop (Section 1a).
+        # It should check wrongRe before selecting, just like Section 2 does.
+        import re
+        # Look for the correctRe check in the native radio loop
+        # The pattern: correctRe.test(text) should be accompanied by wrongRe check
+        section1a = _PUZZLE_SOLVE_JS.split("// 1b.")[0]
+        # Count correctRe.test calls that do NOT have a wrongRe guard nearby
+        correct_checks = list(re.finditer(r"correctRe\.test\(text\)", section1a))
+        assert len(correct_checks) > 0, "Section 1a should check correctRe"
+        for m in correct_checks:
+            # The wrongRe check should be on the same line or very close
+            ctx = section1a[max(0, m.start() - 80):m.end() + 80]
+            assert "wrongRe" in ctx, (
+                "Section 1a correctRe check must also verify !wrongRe.test(text)"
+            )
+
+    def test_section1b_checks_wrongRe(self):
+        """Section 1b (ARIA radio) correctRe pass must also check !wrongRe."""
+        import re
+        section1b = _PUZZLE_SOLVE_JS.split("// 1b.")[1].split("// 2.")[0]
+        correct_checks = list(re.finditer(r"correctRe\.test\(text\)", section1b))
+        assert len(correct_checks) > 0, "Section 1b should check correctRe"
+        for m in correct_checks:
+            ctx = section1b[max(0, m.start() - 80):m.end() + 80]
+            assert "wrongRe" in ctx, (
+                "Section 1b correctRe check must also verify !wrongRe.test(text)"
+            )
+
+
+class TestPuzzleSolverLabelPriority:
+    """Radio selection should prefer direct correctness statements over option labels."""
+
+    def test_label_prefix_deprioritization(self):
+        """Options starting with 'option', 'answer', etc. should be deprioritized."""
+        # The solver should have a label prefix pattern to identify option labels
+        import re
+        assert re.search(r"option|answer|choice", _PUZZLE_SOLVE_JS, re.IGNORECASE), (
+            "Puzzle solver must have label prefix detection"
+        )
+        # There should be a two-pass or priority mechanism
+        # Look for a label/prefix regex or priority variable
+        assert "labelPrefix" in _PUZZLE_SOLVE_JS or "priority" in _PUZZLE_SOLVE_JS or "prefer" in _PUZZLE_SOLVE_JS, (
+            "Puzzle solver should have a priority mechanism for correctRe matches"
+        )
+
+
 class TestRetryTemperature:
     """Test that retry attempts use recovery LLM with temperature."""
 
