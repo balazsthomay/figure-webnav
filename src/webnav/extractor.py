@@ -12,71 +12,23 @@ from webnav.perception import CODE_PATTERN, _FALSE_POSITIVE
 async def find_code(page: Page, used_codes: set[str] | None = None) -> str | None:
     """Scan the page for a valid 6-char challenge code.
 
-    Checks inner text, aria snapshot, and hidden DOM elements.
+    Runs ALL scan strategies in a single page.evaluate() call to minimize
+    CDP round-trips. Falls back to Playwright frame API for cross-context
+    iframe searches (can't be done in a single evaluate).
+
     Returns the first valid code found, or None.
     Skips codes in `used_codes` (previously submitted on earlier steps).
     """
     skip = used_codes or set()
 
-    # Priority 0: check for "confirmed" codes in green success boxes
-    # and "Code revealed:" patterns (puzzle challenge success messages).
-    # This runs BEFORE page_cleaner can hide high z-index success elements.
-    # Also re-hides noise elements that React re-renders may have restored
-    # (clean_page sets display:none !important, but React style reconciliation
-    # can override inline styles after any click triggers a re-render).
-    green_code = await page.evaluate("""
-        () => {
-            // Re-hide noise elements first — React re-renders can undo display:none
-            document.querySelectorAll('[data-wnav-noise]').forEach(el =>
-                el.style.setProperty('display', 'none', 'important'));
-            const codeRe = /^[A-Z0-9]{6}$/;
-            const fp = /^(SUBMIT|SCROLL|CLICKS?|REVEAL|BUTTON|HIDDEN|STEPBAR|STEP\\d+|HELLOA|CANVAS|MOVING|COMPLE|DECODE|STRING|BASE64|PLEASE|SELECT|OPTION)$/;
-            // Strategy 1: Look for code inside green success containers
-            const greens = document.querySelectorAll(
-                '.text-green-600, .text-green-700, [class*="bg-green"] span, [class*="bg-green"] p, [class*="bg-green"] div'
-            );
-            for (const el of greens) {
-                const text = (el.textContent || '').trim();
-                if (codeRe.test(text) && !fp.test(text)) return text;
-            }
-            // Strategy 2: Look for "Code revealed:" pattern in visible text
-            const allText = document.body.innerText || '';
-            const revealMatch = allText.match(/(?:code\\s*revealed|your\\s*code)[:\\s]*([A-Z0-9]{6})/);
-            if (revealMatch && !fp.test(revealMatch[1])) return revealMatch[1];
-            // Strategy 3: Find ANY 6-char code in green/success-styled containers
-            for (const el of document.querySelectorAll('[class*="green"], [class*="success"], [style*="green"]')) {
-                const m = (el.textContent || '').match(/([A-Z0-9]{6})/);
-                if (m && !fp.test(m[1])) return m[1];
-            }
-            return null;
-        }
-    """)
-    if green_code and green_code not in skip:
-        return green_code
+    # Single consolidated JS scan — all strategies in one CDP round-trip
+    code = await page.evaluate(_FIND_CODE_JS, list(skip))
+    if code:
+        return code
 
-    # Primary: scan visible text (fast — single DOM read)
-    try:
-        text = await page.inner_text("body")
-    except Exception:
-        text = ""
-
-    candidates = [c for c in _extract_candidates(text) if c not in skip]
-    if candidates:
-        return candidates[0]
-
-    # Fallback: single JS scan for hidden codes (attributes, hidden elements, comments)
-    # Combines all checks into one evaluate() call to avoid multiple DOM traversals.
-    hidden_code = await page.evaluate(_HIDDEN_CODE_SCAN_JS)
-    if hidden_code and hidden_code not in skip:
-        return hidden_code
-
-    # Fallback: scan Shadow DOM roots for codes (web components hide content)
-    shadow_code = await page.evaluate(_SHADOW_DOM_SCAN_JS)
-    if shadow_code and shadow_code not in skip:
-        return shadow_code
-
-    # Fallback: search all nested iframes for codes via Playwright frame API
-    for frame in page.frames[1:]:  # Skip main frame (already searched)
+    # Frame fallback: search cross-context iframes via Playwright frame API
+    # (can't be in the single evaluate — different execution contexts)
+    for frame in page.frames[1:]:
         try:
             frame_text = await frame.evaluate("() => document.body?.innerText || ''")
             frame_candidates = [c for c in _extract_candidates(frame_text) if c not in skip]
@@ -84,27 +36,6 @@ async def find_code(page: Page, used_codes: set[str] | None = None) -> str | Non
                 return frame_candidates[0]
         except Exception:
             continue
-
-    # Fallback: recursive JS search through iframe contentDocuments
-    # (catches same-origin iframes that Playwright may not enumerate)
-    iframe_code = await page.evaluate(_IFRAME_RECURSIVE_SCAN_JS)
-    if iframe_code and iframe_code not in skip:
-        return iframe_code
-
-    # Fallback: decode Base64-encoded strings that may contain a 6-char code
-    b64_code = await page.evaluate(_BASE64_DECODE_SCAN_JS)
-    if b64_code and b64_code not in skip:
-        return b64_code
-
-    # Fallback: scan inline <script> tags for codes in JS data/variables
-    script_code = await page.evaluate(_SCRIPT_TAG_SCAN_JS)
-    if script_code and script_code not in skip:
-        return script_code
-
-    # Fallback: split content reassembly + multi-encoding + template/noscript/SVG
-    advanced_code = await page.evaluate(_ADVANCED_SCAN_JS)
-    if advanced_code and advanced_code not in skip:
-        return advanced_code
 
     return None
 
@@ -610,6 +541,86 @@ _ADVANCED_SCAN_JS = """
     return null;
 })()
 """
+
+
+# ---------------------------------------------------------------------------
+# Combined scan: single evaluate() call wrapping ALL scan strategies.
+# Eliminates 6-7 CDP round-trips per find_code() invocation.
+# Each sub-block is an existing IIFE; the wrapper checks results against
+# the skip set (used_codes) and returns the first valid code.
+# ---------------------------------------------------------------------------
+_FIND_CODE_JS = (
+    "(skipArray) => {\n"
+    "  const skip = new Set(skipArray);\n"
+    "\n"
+    "  // --- Priority 0: green success boxes + noise re-hide ---\n"
+    "  {\n"
+    "    document.querySelectorAll('[data-wnav-noise]').forEach(el =>\n"
+    "      el.style.setProperty('display', 'none', 'important'));\n"
+    "    const codeRe = /^[A-Z0-9]{6}$/;\n"
+    "    const fp = /^(SUBMIT|SCROLL|CLICKS?|REVEAL|BUTTON|HIDDEN|STEPBAR"
+    "|STEP\\\\d+|HELLOA|CANVAS|MOVING|COMPLE|DECODE|STRING|BASE64|PLEASE"
+    "|SELECT|OPTION)$/;\n"
+    "    const greens = document.querySelectorAll(\n"
+    "      '.text-green-600, .text-green-700, [class*=\"bg-green\"] span,"
+    " [class*=\"bg-green\"] p, [class*=\"bg-green\"] div');\n"
+    "    for (const el of greens) {\n"
+    "      const text = (el.textContent || '').trim();\n"
+    "      if (codeRe.test(text) && !fp.test(text) && !skip.has(text))"
+    " return text;\n"
+    "    }\n"
+    "    const allText = document.body.innerText || '';\n"
+    "    const revealMatch = allText.match("
+    "/(?:code\\\\s*revealed|your\\\\s*code)[:\\\\s]*([A-Z0-9]{6})/);\n"
+    "    if (revealMatch && !fp.test(revealMatch[1])"
+    " && !skip.has(revealMatch[1])) return revealMatch[1];\n"
+    "    for (const el of document.querySelectorAll("
+    "'[class*=\"green\"], [class*=\"success\"], [style*=\"green\"]')) {\n"
+    "      const m = (el.textContent || '').match(/([A-Z0-9]{6})/);\n"
+    "      if (m && !fp.test(m[1]) && !skip.has(m[1])) return m[1];\n"
+    "    }\n"
+    "  }\n"
+    "\n"
+    "  // --- Primary: visible text scan (replaces page.inner_text) ---\n"
+    "  {\n"
+    "    const fp = /^(SUBMIT|SCROLL|CLICKS?|REVEAL|BUTTON|HIDDEN|STEPBAR"
+    "|STEP\\\\d+|HELLOA|CANVAS|MOVING|COMPLE|DECODE|STRING|BASE64|PLEASE"
+    "|SELECT|OPTION)$/;\n"
+    "    const re = /\\\\b([A-Z0-9]{6})\\\\b/g;\n"
+    "    const text = document.body.innerText || '';\n"
+    "    let m;\n"
+    "    while ((m = re.exec(text)) !== null) {\n"
+    "      if (!fp.test(m[1]) && !skip.has(m[1])) return m[1];\n"
+    "    }\n"
+    "  }\n"
+    "\n"
+    "  // --- Fallback 1: hidden codes (attributes, hidden elements, comments) ---\n"
+    "  { const r = " + _HIDDEN_CODE_SCAN_JS.strip() + ";\n"
+    "    if (r && !skip.has(r)) return r; }\n"
+    "\n"
+    "  // --- Fallback 2: shadow DOM ---\n"
+    "  { const r = " + _SHADOW_DOM_SCAN_JS.strip() + ";\n"
+    "    if (r && !skip.has(r)) return r; }\n"
+    "\n"
+    "  // --- Fallback 3: recursive same-origin iframes ---\n"
+    "  { const r = " + _IFRAME_RECURSIVE_SCAN_JS.strip() + ";\n"
+    "    if (r && !skip.has(r)) return r; }\n"
+    "\n"
+    "  // --- Fallback 4: Base64 decode ---\n"
+    "  { const r = " + _BASE64_DECODE_SCAN_JS.strip() + ";\n"
+    "    if (r && !skip.has(r)) return r; }\n"
+    "\n"
+    "  // --- Fallback 5: script tags ---\n"
+    "  { const r = " + _SCRIPT_TAG_SCAN_JS.strip() + ";\n"
+    "    if (r && !skip.has(r)) return r; }\n"
+    "\n"
+    "  // --- Fallback 6: advanced (split, encoding, template, CSS, etc.) ---\n"
+    "  { const r = " + _ADVANCED_SCAN_JS.strip() + ";\n"
+    "    if (r && !skip.has(r)) return r; }\n"
+    "\n"
+    "  return null;\n"
+    "}\n"
+)
 
 
 def _extract_candidates(text: str) -> list[str]:
