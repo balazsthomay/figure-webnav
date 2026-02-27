@@ -107,3 +107,33 @@ class TestDetectStepFromUrl:
         page = make_mock_page(url="https://example.com/step6?version=2")
         assert await tracker.check_advancement(page, 5) is True
         assert await tracker.check_advancement(page, 6) is False
+
+    @pytest.mark.asyncio
+    async def test_check_advancement_final_step_completion_page(self):
+        """Final step: URL navigated away from /step30 → should be True."""
+        tracker = StateTracker(total_steps=30)
+        page = make_mock_page(url="https://example.com/complete")
+        assert await tracker.check_advancement(page, 30) is True
+
+    @pytest.mark.asyncio
+    async def test_check_advancement_final_step_still_on_step(self):
+        """Final step: URL still at /step30 → should be False (not yet advanced)."""
+        tracker = StateTracker(total_steps=30)
+        page = make_mock_page(url="https://example.com/step30?version=2")
+        assert await tracker.check_advancement(page, 30) is False
+
+    @pytest.mark.asyncio
+    async def test_check_advancement_final_step_results_page(self):
+        """Final step: URL navigated to results → should be True."""
+        tracker = StateTracker(total_steps=30)
+        page = make_mock_page(url="https://example.com/results?score=30")
+        assert await tracker.check_advancement(page, 30) is True
+
+    @pytest.mark.asyncio
+    async def test_check_advancement_non_final_step_no_advance(self):
+        """Non-final step: URL without step pattern → fallback to current_step."""
+        tracker = StateTracker(total_steps=30)
+        tracker.current_step = 15
+        page = make_mock_page(url="https://example.com/loading")
+        # detect_step_from_url returns current_step (15), 15 > 15 = False
+        assert await tracker.check_advancement(page, 15) is False

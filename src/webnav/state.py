@@ -68,7 +68,12 @@ class StateTracker:
     async def check_advancement(self, page: Page, expected_step: int) -> bool:
         """Check if the page has advanced past the expected step."""
         actual = await self.detect_step_from_url(page)
-        return actual > expected_step
+        if actual > expected_step:
+            return True
+        # Final step: URL navigated away from /stepN means completion
+        if expected_step >= self.total_steps:
+            return f"/step{expected_step}" not in page.url
+        return False
 
     def summary(self) -> dict:
         return {
